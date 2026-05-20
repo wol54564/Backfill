@@ -1,0 +1,132 @@
+name: "Download R2 Gifts Data"
+
+on:
+  workflow_dispatch:
+    inputs:
+      num_days:
+        description: "Number of latest days to download (default: 1)"
+        required: false
+        default: "1"
+        type: string
+      start_date:
+        description: "Start date for range download (YYYY-MM-DD), leave empty to use num_days"
+        required: false
+        default: ""
+        type: string
+      end_date:
+        description: "End date for range download (YYYY-MM-DD), required if start_date is set"
+        required: false
+        default: ""
+        type: string
+      list_dates:
+        description: "List available dates in R2 (yes/no)"
+        required: false
+        default: "no"
+        type: choice
+        options:
+          - "no"
+          - "yes"
+
+concurrency:
+  group: r2-download
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUTF8: "1"
+
+jobs:
+  download-r2-data:
+    name: Download gifts data from R2
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          cd CFl_data/gifts
+          pip install -q -r requirements.txt
+          pip install -q boto3
+
+      - name: List available dates
+        if: ${{ github.event.inputs.list_dates == 'yes' }}
+        working-directory: CFl_data/gifts
+        env:
+          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          python download_r2_data.py \
+            --bucket "${{ secrets.R2_BUCKET_NAME }}" \
+            --output "./downloaded_data" \
+            --list-dates
+
+      - name: Download by date range
+        if: ${{ github.event.inputs.start_date != '' && github.event.inputs.end_date != '' }}
+        working-directory: CFl_data/gifts
+        env:
+          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          python download_r2_data.py \
+            --bucket "${{ secrets.R2_BUCKET_NAME }}" \
+            --output "./downloaded_data" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}"
+
+      - name: Download latest days
+        if: ${{ github.event.inputs.start_date == '' || github.event.inputs.end_date == '' }}
+        if: ${{ github.event.inputs.list_dates != 'yes' }}
+        working-directory: CFl_data/gifts
+        env:
+          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          python download_r2_data.py \
+            --bucket "${{ secrets.R2_BUCKET_NAME }}" \
+            --output "./downloaded_data" \
+            --days "${{ github.event.inputs.num_days }}"
+
+      - name: Upload downloaded data as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2-downloaded-data
+          path: CFl_data/gifts/downloaded_data/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Download Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download Configuration:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Bucket: \`${{ secrets.R2_BUCKET_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Days: \`${{ github.event.inputs.num_days }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.start_date }}" ]; then
+            echo "- Date Range: \`${{ github.event.inputs.start_date }}\` to \`${{ github.event.inputs.end_date }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Output Location:** \`CFl_data/gifts/downloaded_data/\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -d "CFl_data/gifts/downloaded_data" ]; then
+            echo "**Downloaded Files:**" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            find CFl_data/gifts/downloaded_data -type f | head -20 >> $GITHUB_STEP_SUMMARY
+            FILE_COUNT=$(find CFl_data/gifts/downloaded_data -type f | wc -l)
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Total Files:** \`$FILE_COUNT\`" >> $GITHUB_STEP_SUMMARY
+          fi
