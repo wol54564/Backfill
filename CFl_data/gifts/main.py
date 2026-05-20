@@ -136,7 +136,7 @@ class GiftsScraperOrchestrator:
         logger.info(f"Successfully fetched {len(detailed_listings)}/{len(listings)} detailed listings")
         return detailed_listings
     
-    async def scrape_subcategory(self, subcategory: Dict, max_pages: int = 5) -> Dict:
+    async def scrape_subcategory(self, subcategory: Dict, max_pages: int = 15) -> Dict:
         """Scrape a subcategory with listings and detailed information, handling child categories if present"""
         subcat_slug = subcategory["slug"]
         logger.info(f"\nProcessing: {subcategory['name_ar']}")
@@ -228,7 +228,7 @@ class GiftsScraperOrchestrator:
             logger.error(f"Error processing {subcategory['name_ar']}: {e}")
             return result
     
-    async def scrape_all_subcategories(self, max_pages: int = 5) -> List[Dict]:
+    async def scrape_all_subcategories(self, max_pages: int = 15) -> List[Dict]:
         """Scrape all animal subcategories"""
         try:
             logger.info("Fetching all subcategories...")
@@ -381,7 +381,7 @@ async def main():
     try:
         bucket_name = os.environ.get("CF_R2_BUCKET_NAME", "data-collection-dl")  # Update with your actual bucket name
         profile_name = os.environ.get("AWS_PROFILE", None)
-        max_pages = int(os.environ.get("MAX_PAGES", "5"))  # Max pages per category
+        max_pages = int(os.environ.get("MAX_PAGES", "15"))  # Max pages per category
         
         logger.info("\n" + "="*60)
         logger.info("GIFTS SCRAPER STARTING")
