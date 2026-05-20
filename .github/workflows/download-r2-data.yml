@@ -84,8 +84,7 @@ jobs:
             --end-date "${{ github.event.inputs.end_date }}"
 
       - name: Download latest days
-        if: ${{ github.event.inputs.start_date == '' || github.event.inputs.end_date == '' }}
-        if: ${{ github.event.inputs.list_dates != 'yes' }}
+        if: ${{ (github.event.inputs.start_date == '' || github.event.inputs.end_date == '') && github.event.inputs.list_dates != 'yes' }}
         working-directory: CFl_data/gifts
         env:
           CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
