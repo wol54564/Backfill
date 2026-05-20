@@ -38,9 +38,9 @@ jobs:
           echo "Account 1 | Day=$DOW | Geo=__cr.$GEO"
           echo "====================================="
 
-  # ── Job 2: run all Batch A scrapers ─────────────────────────────────────────
+  # ── Job 2: run all Batch backfill ─────────────────────────────────────────
   scrape:
-    name: Scrape Batch A
+    name: run backfill
     needs: calculate-geo
     runs-on: ubuntu-22.04
     env:
@@ -65,39 +65,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r CFl_data/requirements.txt
 
-      - name: Random start delay (0–30 min stealth offset)
-        run: |
-          DELAY=$((RANDOM % 1800))
-          echo "Waiting ${DELAY}s before starting..."
-          sleep $DELAY
 
-      - name: "[1/7] Animals"
+      - name: "[1/1] gifts"
         continue-on-error: true
-        run: cd CFl_data/Animals && python main.py
+        run: cd CFl_data/gifts && python main.py
 
-      - name: "[2/7] Bikes"
-        continue-on-error: true
-        run: cd CFl_data/bikes && python main.py
-
-      - name: "[3/7] Camping"
-        continue-on-error: true
-        run: cd CFl_data/Camping && python main.py
-
-      - name: "[4/7] Property"
-        continue-on-error: true
-        run: cd CFl_data/Property && python main.py
-
-      - name: "[5/7] New Car"
-        continue-on-error: true
-        run: cd "CFl_data/New Car" && python main.py
-
-      - name: "[6/7] Rest-Automotive-Part1"
-        continue-on-error: true
-        run: cd CFl_data/Rest-Automotive-Part1 && python main.py
-
-      - name: "[7/7] Jobs"
-        continue-on-error: true
-        run: cd CFl_data/Jobs && python main.py
+      
 
       - name: Batch A summary
         if: always()
