@@ -144,7 +144,7 @@ class GiftsJsonScraper:
     
     async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
                            child_slug: Optional[str] = None, district_slug: Optional[str] = None, 
-                           filter_yesterday: bool = False) -> List[Dict]:
+                           filter_yesterday: bool = False) -> Dict:
         """
         Get all listings for a specific subcategory and optional child/district
         
@@ -156,7 +156,7 @@ class GiftsJsonScraper:
             filter_yesterday: If True, only returns listings from yesterday (default False for gifts)
         
         Returns:
-            List of listings
+            Dict with 'listings' and 'pagination' info
         """
         try:
             if child_slug and district_slug:
@@ -176,14 +176,18 @@ class GiftsJsonScraper:
             
             if not json_data:
                 logger.warning(f"No data found for {url}")
-                return []
+                return {"listings": [], "pagination": {}}
+            
+            # Extract pagination info
+            page_props = json_data.get("props", {}).get("pageProps", {})
+            pagination = {
+                "total_pages": page_props.get("total_pages", 1),
+                "current_page": page_props.get("current_page", page_num),
+                "total_count": page_props.get("total_count", 0)
+            }
             
             # Extract listings from the JSON structure
-            listings = (
-                json_data.get("props", {})
-                .get("pageProps", {})
-                .get("listings", [])
-            )
+            listings = page_props.get("listings", [])
             
             # Get yesterday's date for filtering
             yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -228,12 +232,12 @@ class GiftsJsonScraper:
                     "all_images": listing.get("thumbs", []),  # All image URLs
                 })
             
-            logger.info(f"Found {len(formatted_listings)} listings (filtered by yesterday={filter_yesterday})")
-            return formatted_listings
+            logger.info(f"Found {len(formatted_listings)} listings on page {page_num}/{pagination['total_pages']} (filtered by yesterday={filter_yesterday})")
+            return {"listings": formatted_listings, "pagination": pagination}
             
         except Exception as e:
             logger.error(f"Error getting listings from {url}: {e}")
-            return []
+            return {"listings": [], "pagination": {}}
     
     async def get_listing_details(self, listing_slug: str, status: Optional[str] = None) -> Optional[Dict]:
         """

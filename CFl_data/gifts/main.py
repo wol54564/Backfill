@@ -60,27 +60,26 @@ class GiftsScraperOrchestrator:
         except Exception as e:
             logger.warning(f"Error cleaning up temp directory: {e}")
     
-    async def fetch_listing_details_batch(self, listings: List[Dict], subcategory_slug: str) -> List[Dict]:
+    async def fetch_listing_details_batch(self, listings: List[Dict], subcategory_slug: str, max_concurrent: int = 3) -> List[Dict]:
         """
-        Fetch detailed information for each listing from the listings page and download images
+        Fetch detailed information for listings concurrently with rate limiting
         
         Args:
             listings: List of basic listing info from listings page
             subcategory_slug: Category slug for organizing images
+            max_concurrent: Maximum concurrent detail fetches (default 3)
         
         Returns:
             List of detailed listing information with R2 image URLs
         """
-        detailed_listings = []
-        
-        for listing in listings:
+        async def fetch_and_process_listing(listing):
             try:
                 slug = listing.get("slug")
                 status = listing.get("status")
                 
                 if not slug:
                     logger.warning("Listing without slug, skipping...")
-                    continue
+                    return None
                 
                 logger.info(f"Fetching details for {slug}...")
                 
@@ -95,58 +94,81 @@ class GiftsScraperOrchestrator:
                         logger.info(f"Processing {len(images)} images for {slug} (ID: {listing_id})...")
                         R2_image_urls = []
                         
-                        for img_index, image_url in enumerate(images):
-                            try:
-                                image_data = await self.scraper.download_image(image_url)
-                                if image_data:
-                                    R2_path = await asyncio.to_thread(
-                                        self.R2_helper.upload_image,
-                                        image_url,
-                                        image_data,
-                                        subcategory_slug,
-                                        self.save_date,
-                                        listing_id,
-                                        img_index
-                                    )
-                                    if R2_path:
-                                        R2_url = self.R2_helper.generate_R2_url(R2_path)
-                                        R2_image_urls.append(R2_url)
-                                        logger.info(f"  Image {img_index}: {listing_id}_{img_index}.jpg [OK]")
-                                
-                                await asyncio.sleep(0.1)
-                            except Exception as e:
-                                logger.warning(f"Failed to download/upload image {image_url}: {e}")
-                                continue
+                        # Download and upload images concurrently
+                        image_tasks = [
+                            self._process_image(image_url, img_index, listing_id, subcategory_slug)
+                            for img_index, image_url in enumerate(images)
+                        ]
+                        image_results = await asyncio.gather(*image_tasks, return_exceptions=True)
+                        R2_image_urls = [url for url in image_results if isinstance(url, str)]
                         
-                        # Add R2 image URLs to details
                         details["r2_images"] = R2_image_urls
                         logger.info(f"Successfully uploaded {len(R2_image_urls)} images")
                     
-                    detailed_listings.append(details)
                     logger.debug(f"[OK] Retrieved details for {slug}")
+                    return details
                 else:
                     logger.warning(f"Failed to get details for {slug}")
-                
-                await asyncio.sleep(0.5)  # Rate limiting
+                    return None
                 
             except Exception as e:
                 logger.error(f"Error fetching details for listing: {e}")
-                continue
+                return None
+        
+        # Use semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def bounded_fetch(listing):
+            async with semaphore:
+                result = await fetch_and_process_listing(listing)
+                await asyncio.sleep(0.2)  # Rate limiting between requests
+                return result
+        
+        tasks = [bounded_fetch(listing) for listing in listings]
+        detailed_listings = [result for result in await asyncio.gather(*tasks, return_exceptions=True) if isinstance(result, dict)]
         
         logger.info(f"Successfully fetched {len(detailed_listings)}/{len(listings)} detailed listings")
         return detailed_listings
     
-    async def scrape_subcategory(self, subcategory: Dict, max_pages: int = 15) -> Dict:
-        """Scrape a subcategory with listings and detailed information, handling child categories if present"""
+    async def _process_image(self, image_url: str, img_index: int, listing_id: str, subcategory_slug: str) -> Optional[str]:
+        """
+        Download and upload a single image to R2
+        
+        Returns:
+            R2 URL if successful, None otherwise
+        """
+        try:
+            image_data = await self.scraper.download_image(image_url)
+            if image_data:
+                R2_path = await asyncio.to_thread(
+                    self.R2_helper.upload_image,
+                    image_url,
+                    image_data,
+                    subcategory_slug,
+                    self.save_date,
+                    listing_id,
+                    img_index
+                )
+                if R2_path:
+                    R2_url = self.R2_helper.generate_R2_url(R2_path)
+                    logger.info(f"  Image {img_index}: {listing_id}_{img_index}.jpg [OK]")
+                    return R2_url
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to download/upload image {image_url}: {e}")
+            return None
+    
+    async def scrape_subcategory(self, subcategory: Dict) -> Dict:
+        """Scrape a subcategory with all pages and detailed information, handling child categories"""
         subcat_slug = subcategory["slug"]
         logger.info(f"\nProcessing: {subcategory['name_ar']}")
         
         result = {
             "subcategory": subcategory,
-            "listings_by_category": {},  # Changed to organize by category
+            "listings_by_category": {},
             "all_listings": [],
             "has_children": False,
-            "total_pages": 0
+            "total_pages_scraped": 0
         }
         
         try:
@@ -161,28 +183,10 @@ class GiftsScraperOrchestrator:
                     child_slug = child["slug"]
                     logger.info(f"  Scraping child: {child['name_ar']} ({child_slug})")
                     
-                    child_listings = []
-                    page_num = 1
-                    
-                    while page_num <= max_pages:
-                        listings = await self.scraper.get_listings(
-                            subcat_slug,
-                            page_num=page_num,
-                            child_slug=child_slug,
-                            filter_yesterday=False
-                        )
-                        
-                        if not listings:
-                            logger.info(f"  No listings found on page {page_num} for {child['name_ar']}, stopping pagination")
-                            break
-                        
-                        if listings:
-                            logger.info(f"  Fetching detailed information for {len(listings)} listings on page {page_num}...")
-                            detailed_listings = await self.fetch_listing_details_batch(listings, subcat_slug)
-                            child_listings.extend(detailed_listings)
-                        
-                        page_num += 1
-                        await asyncio.sleep(1)  # Rate limiting between pages
+                    child_listings = await self._scrape_category_all_pages(
+                        subcat_slug, 
+                        child_slug=child_slug
+                    )
                     
                     if child_listings:
                         result["listings_by_category"][child["name_ar"]] = child_listings
@@ -193,33 +197,11 @@ class GiftsScraperOrchestrator:
             else:
                 logger.info(f"No child categories found, scraping main category...")
                 
-                # Fetch multiple pages for main category
-                page_num = 1
-                main_listings = []
-                while page_num <= max_pages:
-                    listings = await self.scraper.get_listings(
-                        subcat_slug, 
-                        page_num=page_num,
-                        filter_yesterday=False
-                    )
-                    
-                    if not listings:
-                        logger.info(f"No listings found on page {page_num}, stopping pagination")
-                        break
-                    
-                    if listings:
-                        logger.info(f"Fetching detailed information for {len(listings)} listings on page {page_num}...")
-                        detailed_listings = await self.fetch_listing_details_batch(listings, subcat_slug)
-                        main_listings.extend(detailed_listings)
-                    
-                    page_num += 1
-                    await asyncio.sleep(2)  # Rate limiting between pages
+                main_listings = await self._scrape_category_all_pages(subcat_slug)
                 
                 if main_listings:
                     result["listings_by_category"]["Main"] = main_listings
                     result["all_listings"] = main_listings
-                
-                result["total_pages"] = page_num - 1
             
             logger.info(f"Total listings for {subcategory['name_ar']}: {len(result['all_listings'])}")
             return result
@@ -228,8 +210,52 @@ class GiftsScraperOrchestrator:
             logger.error(f"Error processing {subcategory['name_ar']}: {e}")
             return result
     
-    async def scrape_all_subcategories(self, max_pages: int = 15) -> List[Dict]:
-        """Scrape all animal subcategories"""
+    async def _scrape_category_all_pages(self, subcat_slug: str, child_slug: Optional[str] = None) -> List[Dict]:
+        """
+        Scrape all pages for a category automatically based on total_pages
+        
+        Args:
+            subcat_slug: Parent category slug
+            child_slug: Optional child category slug
+        
+        Returns:
+            Combined listings from all pages
+        """
+        all_listings = []
+        page_num = 1
+        total_pages = 1
+        
+        while page_num <= total_pages:
+            category_label = f"{subcat_slug}/{child_slug}" if child_slug else subcat_slug
+            logger.info(f"Fetching page {page_num} for {category_label}...")
+            
+            result = await self.scraper.get_listings(
+                subcat_slug,
+                page_num=page_num,
+                child_slug=child_slug,
+                filter_yesterday=False
+            )
+            
+            listings = result.get("listings", [])
+            pagination = result.get("pagination", {})
+            total_pages = pagination.get("total_pages", 1)
+            
+            if not listings:
+                logger.info(f"No listings found on page {page_num}")
+                break
+            
+            logger.info(f"Got {len(listings)} listings, fetching details...")
+            detailed_listings = await self.fetch_listing_details_batch(listings, subcat_slug)
+            all_listings.extend(detailed_listings)
+            
+            page_num += 1
+            if page_num <= total_pages:
+                await asyncio.sleep(1)  # Rate limiting between pages
+        
+        return all_listings
+    
+    async def scrape_all_subcategories(self) -> List[Dict]:
+        """Scrape all subcategories with all available pages"""
         try:
             logger.info("Fetching all subcategories...")
             subcategories = await self.scraper.get_subcategories()
@@ -243,7 +269,7 @@ class GiftsScraperOrchestrator:
             all_results = []
             for i, subcategory in enumerate(subcategories, 1):
                 logger.info(f"[{i}/{len(subcategories)}] Processing...")
-                result = await self.scrape_subcategory(subcategory, max_pages=max_pages)
+                result = await self.scrape_subcategory(subcategory)
                 all_results.append(result)
                 
                 if i < len(subcategories):
@@ -379,21 +405,20 @@ async def main():
     orchestrator = None
     
     try:
-        bucket_name = os.environ.get("CF_R2_BUCKET_NAME", "data-collection-dl")  # Update with your actual bucket name
+        bucket_name = os.environ.get("CF_R2_BUCKET_NAME", "data-collection-dl")
         profile_name = os.environ.get("AWS_PROFILE", None)
-        max_pages = int(os.environ.get("MAX_PAGES", "15"))  # Max pages per category
         
         logger.info("\n" + "="*60)
         logger.info("GIFTS SCRAPER STARTING")
         logger.info("="*60)
         logger.info(f"Bucket: {bucket_name}")
-        logger.info(f"Max pages per category: {max_pages}")
+        logger.info("Scraping all available pages per category automatically")
         
         orchestrator = GiftsScraperOrchestrator(bucket_name=bucket_name, profile_name=profile_name)
         await orchestrator.initialize()
         
         logger.info("\nStarting scraping...")
-        results = await orchestrator.scrape_all_subcategories(max_pages=max_pages)
+        results = await orchestrator.scrape_all_subcategories()
         
         if results:
             logger.info("\n" + "="*60)
