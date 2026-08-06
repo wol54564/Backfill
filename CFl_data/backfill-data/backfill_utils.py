@@ -198,38 +198,32 @@ def resolve_category(name: str) -> dict:
 
 def _preimport_datetime_subclassers() -> None:
     """
-    Import libraries that subclass datetime.datetime at load time.
+    Import libraries that subclass or capture datetime.datetime at load time.
 
-    patched_datetime replaces datetime.datetime with a dynamic subclass, which
-    breaks those imports (e.g. pandas ABCTimestamp). Pre-import while the real
-    class is still in place; later category imports reuse sys.modules cache.
+    patched_datetime replaces datetime.datetime with a subclass, which breaks
+    those imports (e.g. pandas ABCTimestamp). openpyxl freezes
+    NestedDateTime.expected_type at import — load it before the patch so the
+    expected type stays the real datetime (our subclass still isinstance-checks).
     """
     if "pandas" not in sys.modules:
         import pandas  # noqa: F401
+    if "openpyxl.packaging.core" not in sys.modules:
+        import openpyxl.packaging.core  # noqa: F401
 
 
-@contextmanager
-def patched_datetime(target_date: datetime) -> Iterator[None]:
-    """
-    Patch naive datetime.datetime.now() to return target_date at noon.
+# Single stable subclass for the process. Recreating it per TARGET_DATE breaks
+# openpyxl: NestedDateTime.expected_type stays bound to the first class.
+_FROZEN_NOW: Optional[datetime] = None
+_ORIGINAL_DATETIME = datetime
+_BACKFILL_DATETIME_CLS = None
 
-    Replaces datetime.datetime with a thin subclass so now() and date arithmetic
-    stay consistent for scrapers (plain datetime from subtraction breaks
-    pandas/openpyxl during Excel export).
 
-    Critical: utcnow() returns the real wall clock (wrapped in this subclass).
-    botocore SigV4 signing uses datetime.datetime.utcnow(); freezing that to
-    TARGET_DATE caused R2 RequestTimeTooSkewed on historical backfills.
-    now(tz=...) likewise uses real time for botocore credential checks.
+def _get_backfill_datetime_cls():
+    global _BACKFILL_DATETIME_CLS
+    if _BACKFILL_DATETIME_CLS is not None:
+        return _BACKFILL_DATETIME_CLS
 
-    Must be active before importing any category module (Property sets
-    module-level constants at import time).
-    """
-    _preimport_datetime_subclassers()
-    import datetime as dt_module
-
-    frozen = target_date.replace(hour=12, minute=0, second=0, microsecond=0)
-    original = dt_module.datetime
+    original = _ORIGINAL_DATETIME
 
     class _BackfillDateTime(original):
         @classmethod
@@ -245,13 +239,13 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
             # must reflect real wall clock, not the backfill TARGET_DATE.
             if tz is not None:
                 return original.now(tz)
-            return cls._wrap(frozen)
+            return cls._wrap(_FROZEN_NOW)
 
         @classmethod
         def utcnow(cls):
             # botocore SigV4 uses utcnow() for the request timestamp. Returning
             # TARGET_DATE caused RequestTimeTooSkewed on R2. Wrap real UTC so
-            # openpyxl/pandas (which expect this subclass) still type-check.
+            # openpyxl/pandas still type-check when they captured this class.
             return cls._wrap(original.utcnow())
 
         def __add__(self, other):
@@ -266,11 +260,43 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
                 return self.__class__._wrap(result)
             return result
 
-    dt_module.datetime = _BackfillDateTime
+    _BACKFILL_DATETIME_CLS = _BackfillDateTime
+    return _BACKFILL_DATETIME_CLS
+
+
+@contextmanager
+def patched_datetime(target_date: datetime) -> Iterator[None]:
+    """
+    Patch naive datetime.datetime.now() to return target_date at noon.
+
+    Uses one process-wide subclass so openpyxl's frozen expected_type stays
+    valid across multiple TARGET_DATEs in the same run.
+
+    Critical: utcnow() returns the real wall clock (wrapped in this subclass).
+    botocore SigV4 signing uses datetime.datetime.utcnow(); freezing that to
+    TARGET_DATE caused R2 RequestTimeTooSkewed on historical backfills.
+    now(tz=...) likewise uses real time for botocore credential checks.
+
+    Must be active before importing any category module (Property sets
+    module-level constants at import time).
+    """
+    global _FROZEN_NOW
+
+    _preimport_datetime_subclassers()
+    import datetime as dt_module
+
+    frozen = target_date.replace(hour=12, minute=0, second=0, microsecond=0)
+    cls = _get_backfill_datetime_cls()
+    previous_frozen = _FROZEN_NOW
+    previous_cls = dt_module.datetime
+
+    _FROZEN_NOW = frozen
+    dt_module.datetime = cls
     try:
         yield
     finally:
-        dt_module.datetime = original
+        dt_module.datetime = previous_cls
+        _FROZEN_NOW = previous_frozen
 
 
 def _load_module(category_dir: str, script: str):
