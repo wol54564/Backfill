@@ -1,0 +1,221 @@
+name: "Backfill — CFl_data"
+
+# Manual backfill for any CFl_data category.
+#
+# Single date: set start_date (end_date optional / same as start_date).
+# Date range: set start_date and end_date — each day runs independently.
+#
+# Example — camping, one day:
+#   category=camping  start_date=2026-08-02
+#   → scrapes 2026-08-01 listings, saves to year=2026/month=08/day=02/
+#
+# Example — camping, range:
+#   category=camping  start_date=2026-08-01  end_date=2026-08-06
+#   → for each day D in range, scrapes D-1 and saves under partition D.
+
+on:
+  workflow_dispatch:
+    inputs:
+      category:
+        description: 'Category to backfill'
+        required: true
+        type: choice
+        options:
+          - animals
+          - bikes
+          - gifts
+          - camping
+          - property
+          - new-car
+          - rest-automotive-part1
+          - jobs
+          - sport
+          - used-car
+          - others
+          - education
+          - fashion-and-family
+          - services
+          - contracting
+          - rest-automotive-part2
+          - dalil
+          - automotive-cars-and-trucks
+          - electronics
+          - wanted-cars
+          - furniture
+          - commercials
+          - rest-automotive-part3
+      start_date:
+        description: 'First TARGET_DATE (YYYY-MM-DD) — partition save date'
+        required: true
+        type: string
+      end_date:
+        description: 'Last TARGET_DATE (YYYY-MM-DD). Leave blank to use start_date only.'
+        required: false
+        type: string
+
+concurrency:
+  group: backfill-data-${{ github.event.inputs.category }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUTF8: '1'
+
+jobs:
+
+  # ── Job 1: validate inputs and derive proxy account + geo for start date ─────
+  prepare:
+    name: Prepare backfill — ${{ github.event.inputs.category }}
+    runs-on: ubuntu-22.04
+    outputs:
+      account: ${{ steps.meta.outputs.account }}
+      geo: ${{ steps.geo.outputs.geo }}
+      start_date: ${{ steps.meta.outputs.start_date }}
+      end_date: ${{ steps.meta.outputs.end_date }}
+    steps:
+      - name: Validate dates and resolve category account
+        id: meta
+        run: |
+          CATEGORY="${{ github.event.inputs.category }}"
+          START="${{ github.event.inputs.start_date }}"
+          END="${{ github.event.inputs.end_date }}"
+          if [ -z "$END" ]; then END="$START"; fi
+
+          if ! date -d "$START" &>/dev/null; then
+            echo "ERROR: Invalid start_date '$START'. Use YYYY-MM-DD." >&2
+            exit 1
+          fi
+          if ! date -d "$END" &>/dev/null; then
+            echo "ERROR: Invalid end_date '$END'. Use YYYY-MM-DD." >&2
+            exit 1
+          fi
+          if [[ "$END" < "$START" ]]; then
+            echo "ERROR: end_date must be on or after start_date." >&2
+            exit 1
+          fi
+
+          case "$CATEGORY" in
+            animals|bikes|gifts|camping|property|new-car|rest-automotive-part1|jobs|sport)
+              ACCOUNT=1 ;;
+            used-car|others|education|fashion-and-family|services|contracting|rest-automotive-part2)
+              ACCOUNT=2 ;;
+            dalil|automotive-cars-and-trucks|electronics|wanted-cars|furniture|commercials|rest-automotive-part3)
+              ACCOUNT=3 ;;
+            *)
+              echo "ERROR: Unknown category '$CATEGORY'" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "account=$ACCOUNT" >> $GITHUB_OUTPUT
+          echo "start_date=$START" >> $GITHUB_OUTPUT
+          echo "end_date=$END" >> $GITHUB_OUTPUT
+
+          DAYS=$(( ( $(date -d "$END" +%s) - $(date -d "$START" +%s) ) / 86400 + 1 ))
+          echo "============================================="
+          echo "CATEGORY   : $CATEGORY"
+          echo "DATE RANGE : $START → $END  ($DAYS day(s))"
+          echo "ACCOUNT    : DATAIMPULSE_USER_$ACCOUNT"
+          echo "============================================="
+
+      - name: Determine geo from start date (proxy sticky for whole run)
+        id: geo
+        run: |
+          TARGET_DATE="${{ steps.meta.outputs.start_date }}"
+          ACCOUNT="${{ steps.meta.outputs.account }}"
+          DOW=$(date -d "$TARGET_DATE" +%w)
+
+          if [ "$ACCOUNT" = "1" ]; then
+            if [ "$DOW" = "0" ]; then GEO="eg"
+            elif [ $(( DOW % 2 )) = "1" ]; then GEO="kw"
+            else GEO="sa"; fi
+          elif [ "$ACCOUNT" = "2" ]; then
+            if [ "$DOW" = "0" ]; then GEO="kw"
+            elif [ $(( DOW % 2 )) = "1" ]; then GEO="sa"
+            else GEO="eg"; fi
+          else
+            if [ "$DOW" = "0" ]; then GEO="sa"
+            elif [ $(( DOW % 2 )) = "1" ]; then GEO="eg"
+            else GEO="kw"; fi
+          fi
+
+          echo "geo=$GEO" >> $GITHUB_OUTPUT
+          echo "Geo for account $ACCOUNT on $TARGET_DATE (DOW=$DOW): __cr.$GEO"
+
+  # ── Job 2: run backfill ───────────────────────────────────────────────────────
+  scrape:
+    name: "Backfill ${{ github.event.inputs.category }}"
+    needs: prepare
+    runs-on: ubuntu-22.04
+    env:
+      CATEGORY: ${{ github.event.inputs.category }}
+      START_DATE: ${{ needs.prepare.outputs.start_date }}
+      END_DATE: ${{ needs.prepare.outputs.end_date }}
+      DATAIMPULSE_HOST: gw.dataimpulse.com
+      DATAIMPULSE_PORT: '823'
+      CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+      CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+      CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+      CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
+
+    steps:
+      - name: Set DataImpulse credentials for account
+        run: |
+          ACCOUNT="${{ needs.prepare.outputs.account }}"
+          GEO="${{ needs.prepare.outputs.geo }}"
+          case "$ACCOUNT" in
+            1)
+              echo "DATAIMPULSE_USER=${{ secrets.DATAIMPULSE_USER_1 }}__cr.${GEO}" >> $GITHUB_ENV
+              echo "DATAIMPULSE_PASS=${{ secrets.DATAIMPULSE_PASS_1 }}" >> $GITHUB_ENV
+              ;;
+            2)
+              echo "DATAIMPULSE_USER=${{ secrets.DATAIMPULSE_USER_2 }}__cr.${GEO}" >> $GITHUB_ENV
+              echo "DATAIMPULSE_PASS=${{ secrets.DATAIMPULSE_PASS_2 }}" >> $GITHUB_ENV
+              ;;
+            3)
+              echo "DATAIMPULSE_USER=${{ secrets.DATAIMPULSE_USER_3 }}__cr.${GEO}" >> $GITHUB_ENV
+              echo "DATAIMPULSE_PASS=${{ secrets.DATAIMPULSE_PASS_3 }}" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r CFl_data/requirements.txt
+
+      - name: Show backfill plan
+        run: |
+          echo "============================================="
+          echo "CFl_data BACKFILL STARTING"
+          echo "Category    : $CATEGORY"
+          echo "Start date  : $START_DATE"
+          echo "End date    : $END_DATE"
+          echo "Account     : DATAIMPULSE_USER_${{ needs.prepare.outputs.account }}"
+          echo "Geo         : __cr.${{ needs.prepare.outputs.geo }}"
+          echo "============================================="
+          CURRENT="$START_DATE"
+          while [ "$CURRENT" != "$(date -d "$END_DATE +1 day" +%Y-%m-%d)" ]; do
+            SCRAPE=$(date -d "$CURRENT -1 day" +%Y-%m-%d)
+            echo "  TARGET=$CURRENT  scrape=$SCRAPE  →  year=$(date -d "$CURRENT" +%Y)/month=$(date -d "$CURRENT" +%m)/day=$(date -d "$CURRENT" +%d)/"
+            CURRENT=$(date -d "$CURRENT +1 day" +%Y-%m-%d)
+          done
+
+      - name: Run backfill
+        run: python CFl_data/backfill-data/run_backfill.py
+
+      - name: Backfill summary
+        if: always()
+        run: |
+          echo "============================================="
+          echo "CFl_data BACKFILL COMPLETE"
+          echo "Category : $CATEGORY"
+          echo "Range    : $START_DATE → $END_DATE"
+          echo "Account  : DATAIMPULSE_USER_${{ needs.prepare.outputs.account }}"
+          echo "Geo      : __cr.${{ needs.prepare.outputs.geo }}"
+          echo "============================================="
