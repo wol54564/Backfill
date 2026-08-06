@@ -16,19 +16,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class CampingJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
+    Scrapes Q84Sale camping listings using JSON data from __NEXT_DATA__ script tag
     This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
     Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/camping"
         self.session = create_session()
         
     async def init_browser(self):
         """Compatibility method - not needed with BeautifulSoup"""
+        pass
+    
+    async def initialize(self):
+        """Initialize the session"""
         pass
     
     async def close_browser(self):
@@ -65,11 +69,11 @@ class GiftsJsonScraper:
     
     async def get_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all subcategories from the camping main page
+        Returns verticalSubcats: Trampoline For Rent, Camping Stuff, Tents, etc.
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching camping subcategories...")
             url = self.base_url
             json_data = await self.get_page_json_data(url)
             
@@ -85,7 +89,7 @@ class GiftsJsonScraper:
             )
             
             if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+                logger.warning("No verticalSubcats found in camping page")
                 return []
             
             subcategories = []
@@ -113,13 +117,14 @@ class GiftsJsonScraper:
             logger.error(f"Error getting subcategories: {e}")
             return []
     
+    
     async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
                           filter_yesterday: bool = False) -> tuple:
         """
-        Get all listings for a specific gifts subcategory
+        Get all listings for a specific camping subcategory
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            subcategory_slug: The slug of the subcategory (e.g., 'trampoline-for-rent')
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,7 +132,7 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
+            # Build URL using the camping parent slug
             url = f"{self.base_url}/{subcategory_slug}/{page_num}"
             logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
             
@@ -215,74 +220,13 @@ class GiftsJsonScraper:
             logger.warning(f"Error formatting date {date_str}: {e}")
             return "Unknown"
     
-    def extract_attributes(self, attrs_list: List[Dict]) -> Dict:
-        """
-        Extract and format attributes from listings
-        
-        Args:
-            attrs_list: List of attribute dictionaries from the listing
-        
-        Returns:
-            Dictionary with:
-            - specification_en: Nested English attributes
-            - specification_ar: Nested Arabic attributes
-            - Plus individual flattened columns for each attribute
-        """
-        spec_en = {}
-        spec_ar = {}
-        flat_output = {}
-        
-        for item in attrs_list:
-            attr = item.get("attrData", {})
-            val = item.get("valData")
-            name_en = attr.get("name_en")
-            name_ar = attr.get("name_ar")
-            attr_type = attr.get("type", "")
-            
-            value_en = None
-            value_ar = None
-            
-            # Handle different value types
-            if isinstance(val, dict):
-                # Dictionary values (e.g., location objects)
-                value_en = val.get("name_en")
-                value_ar = val.get("name_ar")
-            elif isinstance(val, str):
-                # Check if attribute is numeric type
-                if attr_type == "number":
-                    value_en = val
-                    value_ar = val
-                else:
-                    # For other string types, treat as boolean
-                    value_en = "Yes" if val == "1" else "No"
-                    value_ar = "???" if val == "1" else "??"
-            else:
-                continue
-            
-            if value_en and name_en:
-                spec_en[name_en] = value_en
-                flat_output[name_en] = value_en
-            if value_ar and name_ar:
-                spec_ar[name_ar] = value_ar
-                flat_output[name_ar] = value_ar
-        
-        # Return nested columns + flattened individual columns
-        result = {
-            "specification_en": json.dumps(spec_en, ensure_ascii=False),
-            "specification_ar": json.dumps(spec_ar, ensure_ascii=False),
-        }
-        # Add all flattened attributes
-        result.update(flat_output)
-        
-        return result
-    
     async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
         """
         Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
+        Uses the slug to construct the URL (e.g., trampoline-for-rent-20494656)
         
         Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
+            slug: Listing slug (e.g., 'trampoline-for-rent-20494656')
             status: Listing status (normal/pinned etc.)
         
         Returns:
@@ -315,10 +259,6 @@ class GiftsJsonScraper:
             # Get date information
             date_published = listing.get("date_published")
             relative_date = self.format_relative_date(date_published) if date_published else "Unknown"
-            
-            # Extract attributes with better formatting
-            attrs_and_vals = listing.get("attrsAndVals", [])
-            attributes = self.extract_attributes(attrs_and_vals)
             
             # Return detailed listing information
             result = {
@@ -354,8 +294,6 @@ class GiftsJsonScraper:
                 "category": listing.get("category", {}).get("name"),
                 "status": status,
             }
-            # Add attributes (both nested columns and flattened individual columns)
-            result.update(attributes)
             
             return result
             

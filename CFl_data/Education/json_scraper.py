@@ -16,15 +16,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class EducationJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
-    This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    Scrapes Q84Sale education listings using JSON data from __NEXT_DATA__ script tag
+    Handles two cases:
+    - Case 1: Categories with direct listings (e.g., school-supplies)
+    - Case 2: Categories with child categories (e.g., languages ? arabic-teaching, english-teaching, etc.)
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/education"
         self.session = create_session()
         
     async def init_browser(self):
@@ -63,13 +64,13 @@ class GiftsJsonScraper:
             logger.error(f"Error fetching JSON from {url}: {e}")
             return None
     
-    async def get_subcategories(self) -> List[Dict]:
+    async def get_vertical_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all vertical subcategories from the education main page
+        Returns verticalSubcats
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching education vertical subcategories...")
             url = self.base_url
             json_data = await self.get_page_json_data(url)
             
@@ -85,41 +86,89 @@ class GiftsJsonScraper:
             )
             
             if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+                logger.warning("No verticalSubcats found in education page")
                 return []
             
             subcategories = []
-            for subcat in vertical_subcats:
+            for child in vertical_subcats:
                 subcategories.append({
-                    "id": subcat.get("id"),
-                    "slug": subcat.get("slug"),
-                    "name_ar": subcat.get("name_ar"),
-                    "name_en": subcat.get("name_en"),
-                    "listings_count": subcat.get("listings_count"),
-                    "parent_slug": subcat.get("category_parent_slug"),
-                    "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
+                    "id": child.get("id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "slug_url": child.get("slug_url"),
+                    "category_type": child.get("category_type"),
                 })
             
-            logger.info(f"Found {len(subcategories)} subcategories")
+            logger.info(f"Found {len(subcategories)} vertical subcategories")
             for subcat in subcategories:
-                logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings")
+                logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings - Type: {subcat['category_type']}")
             
             return subcategories
             
         except Exception as e:
-            logger.error(f"Error getting subcategories: {e}")
+            logger.error(f"Error getting vertical subcategories: {e}")
             return []
     
-    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
-                          filter_yesterday: bool = False) -> tuple:
+    async def get_child_categories(self, subcategory_slug: str) -> List[Dict]:
         """
-        Get all listings for a specific gifts subcategory
+        Get child categories (catChilds) for a specific subcategory
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            subcategory_slug: The slug of the category (e.g., 'languages')
+            
+        Returns:
+            List of child categories or empty list if none found
+        """
+        try:
+            url = f"{self.base_url}/{subcategory_slug}/1"
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.warning(f"Failed to fetch data for {subcategory_slug}")
+                return []
+            
+            # Extract catChilds from the JSON structure
+            cat_childs = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("catChilds", [])
+            )
+            
+            if not cat_childs:
+                logger.info(f"No catChilds found for {subcategory_slug} (direct listings case)")
+                return []
+            
+            children = []
+            for child in cat_childs:
+                children.append({
+                    "id": child.get("id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "slug_url": child.get("slug_url"),
+                    "category_type": child.get("category_type"),
+                    "category_parent_slug": child.get("category_parent_slug"),
+                })
+            
+            logger.info(f"Found {len(children)} child categories for {subcategory_slug}")
+            for child in children:
+                logger.info(f"  - {child['name_ar']} ({child['slug']}) - {child['listings_count']} listings")
+            
+            return children
+            
+        except Exception as e:
+            logger.error(f"Error getting child categories for {subcategory_slug}: {e}")
+            return []
+    
+    async def get_listings(self, category_slug: str, page_num: int = 1, filter_yesterday: bool = False) -> tuple:
+        """
+        Get all listings for a specific category (either direct or child category)
+        
+        Args:
+            category_slug: The slug of the category
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,9 +176,15 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
-            url = f"{self.base_url}/{subcategory_slug}/{page_num}"
-            logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
+            # Build URL - check if it's a child category (contains slash) or direct category
+            if "/" in category_slug:
+                # Child category like "education/languages/arabic-teaching/1"
+                url = f"{self.base_url}/{category_slug}/{page_num}"
+            else:
+                # Direct category like "education/school-supplies/1"
+                url = f"{self.base_url}/{category_slug}/{page_num}"
+            
+            logger.info(f"Fetching listings for {category_slug} page {page_num}...")
             
             json_data = await self.get_page_json_data(url)
             
@@ -176,14 +231,109 @@ class GiftsJsonScraper:
                     "district_name": listing.get("district_name"),
                     "status": listing.get("status"),
                     "images_count": listing.get("images_count"),
+                    "desc_ar": listing.get("desc_ar"),
+                    "desc_en": listing.get("desc_en"),
                 })
             
             logger.info(f"Found {len(formatted_listings)} listings on page {page_num} (Total Pages: {total_pages})")
             return formatted_listings, total_pages
             
         except Exception as e:
-            logger.error(f"Error getting listings for {subcategory_slug}: {e}")
+            logger.error(f"Error getting listings for {category_slug}: {e}")
             return [], 0
+    
+    async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
+        """
+        Get detailed information for a specific listing
+        Extracts comprehensive data including user info, district, and all attributes
+        
+        Args:
+            slug: The slug of the listing
+            status: Status of the listing (e.g., 'normal')
+        
+        Returns:
+            Dictionary with detailed listing information or None
+        """
+        try:
+            # Build URL for listing details
+            url = f"https://www.q84sale.com/ar/listing/{slug}"
+            
+            logger.info(f"Fetching details from {url}...")
+            
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.warning(f"Failed to fetch details for {slug}")
+                return None
+            
+            # Extract listing details from pageProps
+            listing = json_data.get("props", {}).get("pageProps", {}).get("listing", {})
+            
+            if not listing:
+                logger.warning(f"No listing details found for {slug}")
+                return None
+            
+            # Extract images - directly from images field
+            images = listing.get("images", [])
+            
+            if not images:
+                # Try alternative field names
+                images = listing.get("thumbs", []) or listing.get("thumbs_list", [])
+                if images and isinstance(images[0], str) and "resize450" in images[0]:
+                    # Convert resize450 to resize1000 for full size
+                    images = [img.replace("resize450", "resize1000") if isinstance(img, str) else img for img in images]
+            
+            logger.info(f"Found {len(images)} images for {slug}")
+            
+            # Get date information
+            date_published = listing.get("date_published")
+            relative_date = self.format_relative_date(date_published) if date_published else "Unknown"
+            
+            # Return comprehensive detailed listing information
+            # Use user_adv_id as the primary ID (like Wanted Cars does)
+            listing_id = listing.get("user_adv_id") or listing.get("id")
+            
+            result = {
+                "id": listing_id,
+                "user_adv_id": listing_id,
+                "title": listing.get("title"),
+                "slug": listing.get("slug"),
+                "description": listing.get("description"),
+                "price": listing.get("price"),
+                "phone": listing.get("phone"),
+                "date_published": date_published,
+                "date_relative": relative_date,
+                "date_created": listing.get("date_created"),
+                "date_expired": listing.get("date_expired"),
+                "date_sort": listing.get("date_sort"),
+                "images": images,
+                "images_count": len(images),
+                "address": listing.get("district", {}).get("name"),
+                "full_address": listing.get("district", {}).get("full_path"),
+                "full_address_en": listing.get("district", {}).get("full_path_en"),
+                "views_no": listing.get("user_view_count"),
+                "longitude": listing.get("lon"),
+                "latitude": listing.get("lat"),
+                "user_name": listing.get("user", {}).get("first_name") or listing.get("user", {}).get("name"),
+                "user_email": listing.get("user", {}).get("email"),
+                "user_phone": listing.get("user", {}).get("phone"),
+                "user_id": listing.get("user", {}).get("user_id"),
+                "user_ads": f"{listing.get('user', {}).get('listings_count')} ads",
+                "user_image": listing.get("user", {}).get("image"),
+                "user_type": listing.get("user", {}).get("user_type"),
+                "membership": listing.get("user", {}).get("member_since", "").split("T")[0] if listing.get("user", {}).get("member_since") else None,
+                "is_verified": listing.get("user", {}).get("is_verified"),
+                "is_private_message_enabled": listing.get("is_private_message_enabled"),
+                "is_hide_my_number": listing.get("is_hide_my_number"),
+                "category": listing.get("category", {}).get("name"),
+                "status": status,
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting listing details for {slug}: {e}")
+            return None
     
     def format_relative_date(self, date_str: str) -> str:
         """
@@ -215,161 +365,13 @@ class GiftsJsonScraper:
             logger.warning(f"Error formatting date {date_str}: {e}")
             return "Unknown"
     
-    def extract_attributes(self, attrs_list: List[Dict]) -> Dict:
-        """
-        Extract and format attributes from listings
-        
-        Args:
-            attrs_list: List of attribute dictionaries from the listing
-        
-        Returns:
-            Dictionary with:
-            - specification_en: Nested English attributes
-            - specification_ar: Nested Arabic attributes
-            - Plus individual flattened columns for each attribute
-        """
-        spec_en = {}
-        spec_ar = {}
-        flat_output = {}
-        
-        for item in attrs_list:
-            attr = item.get("attrData", {})
-            val = item.get("valData")
-            name_en = attr.get("name_en")
-            name_ar = attr.get("name_ar")
-            attr_type = attr.get("type", "")
-            
-            value_en = None
-            value_ar = None
-            
-            # Handle different value types
-            if isinstance(val, dict):
-                # Dictionary values (e.g., location objects)
-                value_en = val.get("name_en")
-                value_ar = val.get("name_ar")
-            elif isinstance(val, str):
-                # Check if attribute is numeric type
-                if attr_type == "number":
-                    value_en = val
-                    value_ar = val
-                else:
-                    # For other string types, treat as boolean
-                    value_en = "Yes" if val == "1" else "No"
-                    value_ar = "???" if val == "1" else "??"
-            else:
-                continue
-            
-            if value_en and name_en:
-                spec_en[name_en] = value_en
-                flat_output[name_en] = value_en
-            if value_ar and name_ar:
-                spec_ar[name_ar] = value_ar
-                flat_output[name_ar] = value_ar
-        
-        # Return nested columns + flattened individual columns
-        result = {
-            "specification_en": json.dumps(spec_en, ensure_ascii=False),
-            "specification_ar": json.dumps(spec_ar, ensure_ascii=False),
-        }
-        # Add all flattened attributes
-        result.update(flat_output)
-        
-        return result
-    
-    async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
-        """
-        Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
-        
-        Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
-            status: Listing status (normal/pinned etc.)
-        
-        Returns:
-            Detailed listing information or None if failed
-        """
-        try:
-            url = f"https://www.q84sale.com/ar/listing/{slug}"
-            logger.info(f"Fetching details from {url}")
-            
-            json_data = await self.get_page_json_data(url)
-            
-            if not json_data:
-                logger.warning(f"No data found for {url}")
-                return None
-            
-            # Extract listing from the JSON structure
-            listing = (
-                json_data.get("props", {})
-                .get("pageProps", {})
-                .get("listing", {})
-            )
-            
-            if not listing:
-                logger.warning(f"No listing data found in {url}")
-                return None
-            
-            # Extract images
-            images = listing.get("images", [])
-            
-            # Get date information
-            date_published = listing.get("date_published")
-            relative_date = self.format_relative_date(date_published) if date_published else "Unknown"
-            
-            # Extract attributes with better formatting
-            attrs_and_vals = listing.get("attrsAndVals", [])
-            attributes = self.extract_attributes(attrs_and_vals)
-            
-            # Return detailed listing information
-            result = {
-                "id": listing.get("user_adv_id"),
-                "slug": listing.get("slug"),
-                "title": listing.get("title"),
-                "description": listing.get("description"),
-                "price": listing.get("price"),
-                "phone": listing.get("phone"),
-                "date_published": date_published,
-                "date_relative": relative_date,
-                "date_created": listing.get("date_created"),
-                "date_expired": listing.get("date_expired"),
-                "date_sort": listing.get("date_sort"),
-                "images": images,
-                "images_count": len(images),
-                "address": listing.get("district", {}).get("name"),
-                "full_address": listing.get("district", {}).get("full_path"),
-                "full_address_en": listing.get("district", {}).get("full_path_en"),
-                "views_no": listing.get("user_view_count"),
-                "longitude": listing.get("lon"),
-                "latitude": listing.get("lat"),
-                "user_name": listing.get("user", {}).get("first_name"),
-                "user_email": listing.get("user", {}).get("email"),
-                "user_phone": listing.get("user", {}).get("phone"),
-                "user_ads": f"{listing.get('user', {}).get('listings_count')} ads",
-                "user_image": listing.get("user", {}).get("image"),
-                "user_type": listing.get("user", {}).get("user_type"),
-                "membership": listing.get("user", {}).get("member_since", "").split("T")[0],
-                "is_verified": listing.get("user", {}).get("is_verified"),
-                "is_private_message_enabled": listing.get("is_private_message_enabled"),
-                "is_hide_my_number": listing.get("is_hide_my_number"),
-                "category": listing.get("category", {}).get("name"),
-                "status": status,
-            }
-            # Add attributes (both nested columns and flattened individual columns)
-            result.update(attributes)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error getting listing details for {slug}: {e}")
-            return None
-    
     async def download_image(self, image_url: str) -> Optional[bytes]:
         """
-        Download image from URL
+        Download an image from URL using aiohttp
         
         Args:
-            image_url: URL of the image
-        
+            image_url: URL of the image to download
+            
         Returns:
             Image bytes or None if failed
         """
@@ -377,6 +379,7 @@ class GiftsJsonScraper:
             async with aiohttp.ClientSession() as session:
                 async with session.get(image_url, timeout=30) as response:
                     if response.status == 200:
+                        logger.debug(f"Downloaded image: {image_url}")
                         return await response.read()
                     else:
                         logger.warning(f"Failed to download image {image_url}: Status {response.status}")

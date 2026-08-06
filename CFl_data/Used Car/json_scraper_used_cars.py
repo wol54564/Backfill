@@ -4,8 +4,8 @@ import aiohttp
 import logging
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 import sys
 import os
@@ -16,15 +16,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class UsedCarsJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
+    Scrapes Q84Sale used-cars listings using JSON data from __NEXT_DATA__ script tag
     This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    
+    Structure:
+    - Main categories: Toyota, Lexus, Chevrolet, etc.
+    - Subcategories per main category: Land Cruiser, Camry, etc. (models)
+    - Listings per subcategory
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/automotive/used-cars"
         self.session = create_session()
         
     async def init_browser(self):
@@ -63,63 +67,115 @@ class GiftsJsonScraper:
             logger.error(f"Error fetching JSON from {url}: {e}")
             return None
     
-    async def get_subcategories(self) -> List[Dict]:
+    async def get_main_categories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all main categories from the used-cars main page
+        Returns catChilds: Toyota, Lexus, Chevrolet, Ford, etc.
+        
+        Returns:
+            List of main categories with their metadata
         """
         try:
-            logger.info("Fetching gifts subcategories...")
-            url = self.base_url
+            logger.info("Fetching used-cars main categories...")
+            url = f"{self.base_url}/1"
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
                 logger.error("Failed to fetch main page JSON")
                 return []
             
-            # Extract verticalSubcats from the JSON structure
-            vertical_subcats = (
+            # Extract catChilds from the JSON structure
+            cat_childs = (
                 json_data.get("props", {})
                 .get("pageProps", {})
-                .get("verticalSubcats", [])
+                .get("catChilds", [])
             )
             
-            if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+            if not cat_childs:
+                logger.warning("No catChilds found in used-cars page")
+                return []
+            
+            categories = []
+            for child in cat_childs:
+                categories.append({
+                    "id": child.get("id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "parent_slug": child.get("category_parent_slug"),
+                    "slug_url": child.get("slug_url"),
+                })
+            
+            logger.info(f"Found {len(categories)} main categories")
+            for cat in categories:
+                logger.info(f"  - {cat['name_ar']} ({cat['slug']}) - {cat['listings_count']} listings")
+            
+            return categories
+            
+        except Exception as e:
+            logger.error(f"Error getting main categories: {e}")
+            return []
+    
+    async def get_subcategories(self, main_category_slug: str) -> List[Dict]:
+        """
+        Get all subcategories (models) for a specific main category
+        
+        Args:
+            main_category_slug: The slug of the main category (e.g., 'toyota')
+        
+        Returns:
+            List of subcategories with their metadata
+        """
+        try:
+            logger.info(f"Fetching subcategories for {main_category_slug}...")
+            url = f"{self.base_url}/{main_category_slug}/1"
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.warning(f"Failed to fetch subcategories for {main_category_slug}")
+                return []
+            
+            # Extract catChilds from the JSON structure
+            cat_childs = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("catChilds", [])
+            )
+            
+            if not cat_childs:
+                logger.info(f"No subcategories found for {main_category_slug}")
                 return []
             
             subcategories = []
-            for subcat in vertical_subcats:
+            for child in cat_childs:
                 subcategories.append({
-                    "id": subcat.get("id"),
-                    "slug": subcat.get("slug"),
-                    "name_ar": subcat.get("name_ar"),
-                    "name_en": subcat.get("name_en"),
-                    "listings_count": subcat.get("listings_count"),
-                    "parent_slug": subcat.get("category_parent_slug"),
-                    "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
+                    "id": child.get("id"),
+                    "parent_id": child.get("parent_id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "slug_url": child.get("slug_url"),
+                    "category_parent_slug": child.get("category_parent_slug"),
                 })
             
-            logger.info(f"Found {len(subcategories)} subcategories")
-            for subcat in subcategories:
-                logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings")
-            
+            logger.info(f"Found {len(subcategories)} subcategories for {main_category_slug}")
             return subcategories
             
         except Exception as e:
-            logger.error(f"Error getting subcategories: {e}")
+            logger.error(f"Error getting subcategories for {main_category_slug}: {e}")
             return []
     
-    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
-                          filter_yesterday: bool = False) -> tuple:
+    async def get_listings(self, category_slug: str, subcategory_slug: str = None, 
+                          page_num: int = 1, filter_yesterday: bool = False) -> Tuple[List[Dict], int]:
         """
-        Get all listings for a specific gifts subcategory
+        Get all listings for a specific category or subcategory
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            category_slug: The slug of the category (e.g., 'toyota')
+            subcategory_slug: Optional subcategory slug (e.g., 'land-cruiser'). 
+                            If None, fetches listings for the main category
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,9 +183,13 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
-            url = f"{self.base_url}/{subcategory_slug}/{page_num}"
-            logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
+            # Build URL based on whether we have a subcategory
+            if subcategory_slug:
+                url = f"{self.base_url}/{category_slug}/{subcategory_slug}/{page_num}"
+                logger.info(f"Fetching listings for {category_slug}/{subcategory_slug} page {page_num}...")
+            else:
+                url = f"{self.base_url}/{category_slug}/{page_num}"
+                logger.info(f"Fetching listings for {category_slug} page {page_num}...")
             
             json_data = await self.get_page_json_data(url)
             
@@ -176,13 +236,15 @@ class GiftsJsonScraper:
                     "district_name": listing.get("district_name"),
                     "status": listing.get("status"),
                     "images_count": listing.get("images_count"),
+                    "desc_en": listing.get("desc_en"),
+                    "desc_ar": listing.get("desc_ar"),
                 })
             
-            logger.info(f"Found {len(formatted_listings)} listings on page {page_num} (Total Pages: {total_pages})")
+            logger.info(f"Found {len(formatted_listings)} listings (Total Pages: {total_pages})")
             return formatted_listings, total_pages
             
         except Exception as e:
-            logger.error(f"Error getting listings for {subcategory_slug}: {e}")
+            logger.error(f"Error getting listings: {e}")
             return [], 0
     
     def format_relative_date(self, date_str: str) -> str:
@@ -196,7 +258,9 @@ class GiftsJsonScraper:
             Relative date string
         """
         try:
+            # Parse the date string as timezone-naive
             published = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            # Get current time as timezone-naive for comparison
             now = datetime.now()
             diff = relativedelta(now, published)
             
@@ -214,7 +278,7 @@ class GiftsJsonScraper:
         except Exception as e:
             logger.warning(f"Error formatting date {date_str}: {e}")
             return "Unknown"
-    
+
     def extract_attributes(self, attrs_list: List[Dict]) -> Dict:
         """
         Extract and format attributes from listings
@@ -275,30 +339,28 @@ class GiftsJsonScraper:
         result.update(flat_output)
         
         return result
-    
+
     async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
         """
-        Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
+        Get detailed information for a specific listing
         
         Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
-            status: Listing status (normal/pinned etc.)
+            slug: The slug of the listing (format: 'model-id')
+            status: The status of the listing (normal, pinned, etc.)
         
         Returns:
-            Detailed listing information or None if failed
+            Dictionary with detailed listing information including full images list
         """
         try:
             url = f"https://www.q84sale.com/ar/listing/{slug}"
-            logger.info(f"Fetching details from {url}")
+            logger.info(f"Fetching listing details for {slug}...")
             
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
-                logger.warning(f"No data found for {url}")
+                logger.warning(f"Failed to fetch details for {slug}")
                 return None
             
-            # Extract listing from the JSON structure
             listing = (
                 json_data.get("props", {})
                 .get("pageProps", {})
@@ -306,7 +368,7 @@ class GiftsJsonScraper:
             )
             
             if not listing:
-                logger.warning(f"No listing data found in {url}")
+                logger.warning(f"No listing data found for {slug}")
                 return None
             
             # Extract images

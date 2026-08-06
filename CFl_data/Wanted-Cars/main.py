@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
-from json_scraper import GiftsJsonScraper
+from json_scraper import WantedCarsJsonScraper
 from s3_helper import R2Helper
 
 logging.basicConfig(
@@ -17,10 +17,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class GiftsScraperOrchestrator:
+class WantedCarsScraperOrchestrator:
     """
-    Orchestrates the scraping of gifts data with AWS R2 integration
-    Scrapes subcategories: Men Clothes, Men Shoes, Ladies Clothes, Women Accessories, etc.
+    Orchestrates the scraping of wanted-cars data with AWS R2 integration
+    Scrapes subcategories: Wanted American Cars, Wanted European Car, Wanted Asian Cars
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, temp_dir: str = "temp_data"):
@@ -41,7 +41,7 @@ class GiftsScraperOrchestrator:
         
     async def initialize(self):
         """Initialize the scraper and R2 client"""
-        self.scraper = GiftsJsonScraper()
+        self.scraper = WantedCarsJsonScraper()
         # No browser initialization needed with BeautifulSoup
         
         try:
@@ -144,7 +144,7 @@ class GiftsScraperOrchestrator:
     
     async def scrape_subcategory(self, subcategory: Dict) -> Dict:
         """
-        Scrape a gifts subcategory with listings and detailed information
+        Scrape a wanted-cars subcategory with listings and detailed information
         Automatically scrapes all available pages returned by the API
         
         Args:
@@ -206,11 +206,11 @@ class GiftsScraperOrchestrator:
     
     async def scrape_all_subcategories(self) -> List[Dict]:
         """
-        Scrape all gifts subcategories from the main page
-        Automatically discovers and scrapes all available pages
+        Scrape all wanted-cars subcategories from the main page
+        Automatically discovers and scrapes all available pages: Wanted American Cars, Wanted European Car, Wanted Asian Cars
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching wanted-cars subcategories...")
             subcategories = await self.scraper.get_subcategories()
             
             if not subcategories:
@@ -238,7 +238,7 @@ class GiftsScraperOrchestrator:
     async def save_all_to_R2(self, results: List[Dict]) -> Dict:
         """
         Save all data to R2 with proper partitioning
-        Creates an Excel file named 'gifts' with sheets for each subcategory
+        Creates an Excel file named 'wanted-cars' with sheets for each subcategory
         """
         upload_summary = {
             "excel_files": [],
@@ -258,13 +258,13 @@ class GiftsScraperOrchestrator:
             logger.info("\nUploading to AWS R2...")
             
             # Create single Excel file with sheets for each subcategory
-            logger.info("Creating Excel file 'gifts' with subcategory sheets...")
+            logger.info("Creating Excel file 'wanted-cars' with subcategory sheets...")
             
-            temp_excel = self.temp_dir / "gifts_temp.xlsx"
+            temp_excel = self.temp_dir / "wanted-cars_temp.xlsx"
             with pd.ExcelWriter(temp_excel, engine='openpyxl') as writer:
                 # Create Info sheet with summary
                 info_data = [{
-                    "Project": "Gifts",
+                    "Project": "Wanted Cars",
                     "Total Subcategories": len(results),
                     "Total Listings": total_listings,
                     "Data Scraped Date": self.scrape_date.strftime('%Y-%m-%d'),
@@ -287,7 +287,7 @@ class GiftsScraperOrchestrator:
             R2_excel_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
                 str(temp_excel),
-                f"excel-files/gifts.xlsx",
+                f"excel-files/wanted-cars.xlsx",
                 self.save_date,
                 retries=3
             )
@@ -295,13 +295,13 @@ class GiftsScraperOrchestrator:
             if R2_excel_path:
                 R2_url = self.R2_helper.generate_R2_url(R2_excel_path)
                 upload_summary["excel_files"].append({
-                    "name": "gifts",
+                    "name": "wanted-cars",
                     "subcategories_count": len(results),
                     "total_listings": total_listings,
                     "R2_path": R2_excel_path,
                     "R2_url": R2_url
                 })
-                logger.info(f"[OK] Uploaded: gifts.xlsx ({total_listings} listings across {len(results)} subcategories)")
+                logger.info(f"[OK] Uploaded: wanted-cars.xlsx ({total_listings} listings across {len(results)} subcategories)")
 
             json_version_payload = [
                 {
@@ -311,53 +311,39 @@ class GiftsScraperOrchestrator:
                 for result in results
                 if result["listings"]
             ]
-            json_version_file = self.temp_dir / "gifts_json_version_temp.json"
+            json_version_file = self.temp_dir / "wanted-cars_json_version_temp.json"
             with open(json_version_file, 'w', encoding='utf-8') as jf:
                 json.dump(json_version_payload, jf, ensure_ascii=False, indent=2)
 
             R2_json_version_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
                 str(json_version_file),
-                f"json version/gifts.json",
+                f"json version/wanted-cars.json",
                 self.save_date,
                 retries=3
             )
             if R2_json_version_path:
                 upload_summary["json_files"].append(R2_json_version_path)
-                logger.info("[OK] Uploaded JSON version: gifts.json")
+                logger.info("[OK] Uploaded JSON version: wanted-cars.json")
             json_version_file.unlink(missing_ok=True)
             
             temp_excel.unlink(missing_ok=True)
             
-            # Create and upload JSON file
-            logger.info("Creating JSON file with summary...")
-            json_file = self.temp_dir / "gifts_temp.json"
-            
-            # Build subcategories summary
-            subcategories_summary = []
-            for result in results:
-                subcat = result["subcategory"]
-                subcategories_summary.append({
-                    "name_ar": subcat.get("name_ar"),
-                    "name_en": subcat.get("name_en"),
-                    "slug": subcat.get("slug"),
-                    "listings_count": len(result["listings"]),
-                    "total_pages_scraped": result["total_pages"]
-                })
-            
+            # Upload JSON summary
+            logger.info("Uploading JSON summary...")
             duration_sec = time.time() - self.start_time if self.start_time else 0
             session_requests_total = int(getattr(getattr(self.scraper, "session", None), "request_count", 0) or 0)
             effective_requests_total = max(getattr(self, "requests_total", 0), session_requests_total)
             effective_requests_failed = getattr(self, "requests_failed", 0)
             error_rate_pct = (effective_requests_failed / effective_requests_total * 100.0) if effective_requests_total > 0 else 0.0
             requests_per_min = (effective_requests_total / (duration_sec / 60.0)) if duration_sec > 0 else 0.0
-            json_data = {
+            json_summary = {
                 "scraped_at": datetime.now().isoformat(),
                 "data_scraped_date": self.scrape_date.strftime('%Y-%m-%d'),
                 "saved_to_R2_date": self.save_date.strftime('%Y-%m-%d'),
                 "total_subcategories": len(results),
                 "total_listings": total_listings,
-                "subcategories": subcategories_summary,
+                "subcategories": [],
                 "request_metrics": {
                     "requests_total": effective_requests_total,
                     "requests_failed": effective_requests_failed,
@@ -367,96 +353,89 @@ class GiftsScraperOrchestrator:
                 },
             }
             
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, ensure_ascii=False, indent=2)
+            for result in results:
+                if result["listings"]:
+                    subcategory = result["subcategory"]
+                    json_summary["subcategories"].append({
+                        "name_ar": subcategory["name_ar"],
+                        "name_en": subcategory["name_en"],
+                        "slug": subcategory["slug"],
+                        "listings_count": len(result["listings"]),
+                        "total_pages_scraped": result.get("total_pages", 0),
+                    })
             
-            # Upload JSON to R2
+            temp_json = self.temp_dir / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(temp_json, 'w', encoding='utf-8') as f:
+                json.dump(json_summary, f, ensure_ascii=False, indent=2)
+            
             R2_json_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
-                str(json_file),
-                f"json-files/gifts.json",
-                self.save_date,
-                retries=3
+                str(temp_json),
+                f"json-files/summary_{self.save_date.strftime('%Y%m%d')}.json",
+                self.save_date
             )
             
             if R2_json_path:
-                R2_url = self.R2_helper.generate_R2_url(R2_json_path)
-                upload_summary["json_files"].append({
-                    "name": "gifts",
-                    "total_listings": total_listings,
-                    "R2_path": R2_json_path,
-                    "R2_url": R2_url
-                })
-                logger.info(f"[OK] Uploaded: gifts.json ({total_listings} listings)")
+                upload_summary["json_files"].append(R2_json_path)
+                logger.info(f"[OK] Uploaded JSON summary")
             
-            json_file.unlink(missing_ok=True)
+            temp_json.unlink(missing_ok=True)
             
         except Exception as e:
-            logger.error(f"Error UPLOADING TO R2: {e}")
+            logger.error(f"Error in R2 upload: {e}")
         
         return upload_summary
-    
-    async def run(self) -> Dict:
-        """Main orchestration method"""
-        try:
-            await self.initialize()
-            self.start_time = time.time()
-            
-            logger.info("=" * 80)
-            logger.info("GIFTS SCRAPER ORCHESTRATOR")
-            logger.info("=" * 80)
-            
-            # Scrape all subcategories with their listings
-            results = await self.scrape_all_subcategories()
-            
-            if not results:
-                logger.error("Failed to scrape any data!")
-                return {
-                    "status": "failed",
-                    "message": "No data scraped"
-                }
-            
-            # Save to R2
-            upload_summary = await self.save_all_to_R2(results)
-            
-            logger.info("\n" + "=" * 80)
-            logger.info("SCRAPING COMPLETED")
-            logger.info("=" * 80)
-            logger.info(json.dumps(upload_summary, indent=2, ensure_ascii=False))
-            
-            return {
-                "status": "success",
-                "upload_summary": upload_summary
-            }
-            
-        except Exception as e:
-            logger.error(f"Fatal error: {e}")
-            return {
-                "status": "failed",
-                "message": str(e)
-            }
-        finally:
-            await self.cleanup()
 
 
 async def main():
-    """Entry point for the scraper"""
-    # Configuration
-    BUCKET_NAME = os.environ.get("CF_R2_BUCKET_NAME")
+    """Main entry point for the wanted-cars scraper"""
+    orchestrator = None
     
-    orchestrator = GiftsScraperOrchestrator(
-        bucket_name=BUCKET_NAME,
-    )
-    
-    result = await orchestrator.run()
-    
-    # Return exit code based on status
-    exit_code = 0 if result["status"] == "success" else 1
-    return exit_code
+    try:
+        bucket_name = os.environ.get("CF_R2_BUCKET_NAME")
+        profile_name = os.environ.get("AWS_PROFILE", None)
+        
+        logger.info("\n" + "="*60)
+        logger.info("WANTED CARS SCRAPER STARTING")
+        logger.info("="*60)
+        logger.info(f"Bucket: {bucket_name}")
+        logger.info(f"Mode: Scrape ALL available pages per subcategory")
+        
+        orchestrator = WantedCarsScraperOrchestrator(bucket_name=bucket_name, profile_name=profile_name)
+        await orchestrator.initialize()
+        orchestrator.start_time = time.time()
+        
+        logger.info("\nStarting scraping...")
+        results = await orchestrator.scrape_all_subcategories()
+        
+        if results:
+            logger.info("\n" + "="*60)
+            logger.info("UPLOADING TO R2")
+            logger.info("="*60)
+            
+            upload_summary = await orchestrator.save_all_to_R2(results)
+            
+            logger.info("\n" + "="*60)
+            logger.info("SCRAPING COMPLETED")
+            logger.info("="*60)
+            logger.info(f"Excel files uploaded: {len(upload_summary['excel_files'])}")
+            logger.info(f"Total listings: {upload_summary['total_listings']}")
+            
+            for excel_file in upload_summary['excel_files']:
+                logger.info(f"  - {excel_file['name']}: {excel_file['total_listings']} listings")
+            
+        else:
+            logger.error("Scraping failed - no results!")
+            
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        
+    finally:
+        if orchestrator:
+            await orchestrator.cleanup()
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    exit(exit_code)
+    asyncio.run(main())
 
 

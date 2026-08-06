@@ -17,7 +17,7 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
+    Partitions data by date: rest-automotive-part3/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -69,7 +69,7 @@ class R2Helper:
     def get_partition_prefix(self, target_date: datetime = None) -> str:
         """
         Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Format: 4sale-data/rest-automotive-part3/year=YYYY/month=MM/day=DD/
         
         Args:
             target_date: Date to partition by (defaults to yesterday)
@@ -85,7 +85,7 @@ class R2Helper:
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/rest-automotive-part3/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
                     target_date: datetime = None, retries: int = 3) -> Optional[str]:
@@ -293,7 +293,7 @@ class R2Helper:
     
     def upload_image(self, image_url: str, image_data: bytes, subcategory_slug: str,
                      target_date: datetime = None, listing_id: Optional[str] = None, 
-                     image_index: int = 0) -> Optional[str]:
+                     image_index: int = 0, category_type: str = None) -> Optional[str]:
         """
         Upload image bytes to R2 with ID-based naming
         
@@ -304,6 +304,7 @@ class R2Helper:
             target_date: Date for partitioning
             listing_id: Listing ID for image naming (if provided, image will be named as listing_id_index.jpg)
             image_index: Index of image in the list (0, 1, 2, etc.)
+            category_type: Main category type (dealerships, car-offices, car-garages, car-rental)
         
         Returns:
             Full R2 path or None if failed
@@ -319,7 +320,11 @@ class R2Helper:
                     filename = f"image_{int(__import__('time').time())}.jpg"
             
             partition = self.get_partition_prefix(target_date)
-            R2_key = f"{partition}/images/{subcategory_slug}/{filename}"
+            # Include category_type in path if provided
+            if category_type:
+                R2_key = f"{partition}/images/{category_type}/{subcategory_slug}/{filename}"
+            else:
+                R2_key = f"{partition}/images/{subcategory_slug}/{filename}"
             
             logger.info(f"Uploading image: {filename}")
             logger.info(f"Full R2 path: r2://{self.bucket_name}/{R2_key}")

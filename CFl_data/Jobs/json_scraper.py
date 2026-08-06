@@ -16,15 +16,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class JobsJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
+    Scrapes Q84Sale jobs listings using JSON data from __NEXT_DATA__ script tag
     This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    Handles two main subcategories: Job Openings and Job Seeker
+    Each has multiple catChilds (subcategories like Part Time Job, Accounting, etc.)
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/jobs"
         self.session = create_session()
         
     async def init_browser(self):
@@ -63,14 +64,14 @@ class GiftsJsonScraper:
             logger.error(f"Error fetching JSON from {url}: {e}")
             return None
     
-    async def get_subcategories(self) -> List[Dict]:
+    async def get_main_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get the main subcategories from the jobs main page
+        Returns verticalSubcats: Job Openings and Job Seeker
         """
         try:
-            logger.info("Fetching gifts subcategories...")
-            url = self.base_url
+            logger.info("Fetching jobs main subcategories...")
+            url = self.base_url  # Main page is not paginated
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
@@ -85,7 +86,7 @@ class GiftsJsonScraper:
             )
             
             if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+                logger.warning("No verticalSubcats found in jobs page")
                 return []
             
             subcategories = []
@@ -96,30 +97,81 @@ class GiftsJsonScraper:
                     "name_ar": subcat.get("name_ar"),
                     "name_en": subcat.get("name_en"),
                     "listings_count": subcat.get("listings_count"),
-                    "parent_slug": subcat.get("category_parent_slug"),
                     "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
+                    "category_parent_slug": subcat.get("category_parent_slug"),
                 })
             
-            logger.info(f"Found {len(subcategories)} subcategories")
+            logger.info(f"Found {len(subcategories)} main subcategories")
             for subcat in subcategories:
                 logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings")
             
             return subcategories
             
         except Exception as e:
-            logger.error(f"Error getting subcategories: {e}")
+            logger.error(f"Error getting main subcategories: {e}")
             return []
     
-    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
-                          filter_yesterday: bool = False) -> tuple:
+    async def get_category_children(self, subcategory_slug: str) -> List[Dict]:
         """
-        Get all listings for a specific gifts subcategory
+        Get child categories (catChilds) for a specific main subcategory
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            subcategory_slug: The slug of the main category (e.g., 'job-openings')
+        
+        Returns:
+            List of child categories
+        """
+        try:
+            url = f"{self.base_url}/{subcategory_slug}/1"
+            logger.info(f"Fetching child categories for {subcategory_slug}...")
+            
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.warning(f"No data found for {url}")
+                return []
+            
+            # Extract catChilds from the JSON response
+            cat_childs = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("catChilds", [])
+            )
+            
+            if not cat_childs:
+                logger.warning(f"No catChilds found for {subcategory_slug}")
+                return []
+            
+            children = []
+            for child in cat_childs:
+                children.append({
+                    "id": child.get("id"),
+                    "parent_id": child.get("parent_id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "slug_url": child.get("slug_url"),
+                    "category_parent_slug": child.get("category_parent_slug"),
+                })
+            
+            logger.info(f"Found {len(children)} child categories for {subcategory_slug}")
+            for child in children:
+                logger.info(f"  - {child['name_ar']} ({child['slug']}) - {child['listings_count']} listings")
+            
+            return children
+            
+        except Exception as e:
+            logger.error(f"Error getting category children for {subcategory_slug}: {e}")
+            return []
+    
+    async def get_listings(self, category_slug: str, page_num: int = 1, 
+                          filter_yesterday: bool = False) -> tuple:
+        """
+        Get all listings for a specific jobs category
+        
+        Args:
+            category_slug: The slug of the category (e.g., 'jobs/job-openings/part-time-job')
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,9 +179,9 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
-            url = f"{self.base_url}/{subcategory_slug}/{page_num}"
-            logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
+            # Build URL using the category slug
+            url = f"{self.base_url}/{category_slug}/{page_num}"
+            logger.info(f"Fetching listings for {category_slug} page {page_num}...")
             
             json_data = await self.get_page_json_data(url)
             
@@ -176,129 +228,39 @@ class GiftsJsonScraper:
                     "district_name": listing.get("district_name"),
                     "status": listing.get("status"),
                     "images_count": listing.get("images_count"),
+                    "description": listing.get("description"),
+                    "desc_en": listing.get("desc_en"),
+                    "desc_ar": listing.get("desc_ar"),
                 })
             
             logger.info(f"Found {len(formatted_listings)} listings on page {page_num} (Total Pages: {total_pages})")
             return formatted_listings, total_pages
             
         except Exception as e:
-            logger.error(f"Error getting listings for {subcategory_slug}: {e}")
+            logger.error(f"Error getting listings for {category_slug}: {e}")
             return [], 0
     
-    def format_relative_date(self, date_str: str) -> str:
+    async def get_listing_details(self, listing_slug: str, status: str = "normal") -> Optional[Dict]:
         """
-        Format a date string to relative format (e.g., '2 days ago')
+        Get detailed information for a specific listing
         
         Args:
-            date_str: Date string in format 'YYYY-MM-DD HH:MM:SS'
+            listing_slug: The slug of the listing
+            status: Status of the listing
         
         Returns:
-            Relative date string
+            Dictionary with listing details or None if failed
         """
         try:
-            published = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-            now = datetime.now()
-            diff = relativedelta(now, published)
-            
-            if diff.years > 0:
-                return f"{diff.years} year{'s' if diff.years > 1 else ''} ago"
-            if diff.months > 0:
-                return f"{diff.months} month{'s' if diff.months > 1 else ''} ago"
-            if diff.days > 0:
-                return f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
-            if diff.hours > 0:
-                return f"{diff.hours} hour{'s' if diff.hours > 1 else ''} ago"
-            if diff.minutes > 0:
-                return f"{diff.minutes} minute{'s' if diff.minutes > 1 else ''} ago"
-            return "Just now"
-        except Exception as e:
-            logger.warning(f"Error formatting date {date_str}: {e}")
-            return "Unknown"
-    
-    def extract_attributes(self, attrs_list: List[Dict]) -> Dict:
-        """
-        Extract and format attributes from listings
-        
-        Args:
-            attrs_list: List of attribute dictionaries from the listing
-        
-        Returns:
-            Dictionary with:
-            - specification_en: Nested English attributes
-            - specification_ar: Nested Arabic attributes
-            - Plus individual flattened columns for each attribute
-        """
-        spec_en = {}
-        spec_ar = {}
-        flat_output = {}
-        
-        for item in attrs_list:
-            attr = item.get("attrData", {})
-            val = item.get("valData")
-            name_en = attr.get("name_en")
-            name_ar = attr.get("name_ar")
-            attr_type = attr.get("type", "")
-            
-            value_en = None
-            value_ar = None
-            
-            # Handle different value types
-            if isinstance(val, dict):
-                # Dictionary values (e.g., location objects)
-                value_en = val.get("name_en")
-                value_ar = val.get("name_ar")
-            elif isinstance(val, str):
-                # Check if attribute is numeric type
-                if attr_type == "number":
-                    value_en = val
-                    value_ar = val
-                else:
-                    # For other string types, treat as boolean
-                    value_en = "Yes" if val == "1" else "No"
-                    value_ar = "???" if val == "1" else "??"
-            else:
-                continue
-            
-            if value_en and name_en:
-                spec_en[name_en] = value_en
-                flat_output[name_en] = value_en
-            if value_ar and name_ar:
-                spec_ar[name_ar] = value_ar
-                flat_output[name_ar] = value_ar
-        
-        # Return nested columns + flattened individual columns
-        result = {
-            "specification_en": json.dumps(spec_en, ensure_ascii=False),
-            "specification_ar": json.dumps(spec_ar, ensure_ascii=False),
-        }
-        # Add all flattened attributes
-        result.update(flat_output)
-        
-        return result
-    
-    async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
-        """
-        Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
-        
-        Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
-            status: Listing status (normal/pinned etc.)
-        
-        Returns:
-            Detailed listing information or None if failed
-        """
-        try:
-            url = f"https://www.q84sale.com/ar/listing/{slug}"
-            logger.info(f"Fetching details from {url}")
-            
+            # Listing detail pages use /ar/listing/ not /ar/jobs/
+            url = f"https://www.q84sale.com/ar/listing/{listing_slug}"
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
                 logger.warning(f"No data found for {url}")
                 return None
             
-            # Extract listing from the JSON structure
+            # Extract listing from the JSON response
             listing = (
                 json_data.get("props", {})
                 .get("pageProps", {})
@@ -306,22 +268,15 @@ class GiftsJsonScraper:
             )
             
             if not listing:
-                logger.warning(f"No listing data found in {url}")
+                logger.warning(f"No listing data found for {listing_slug}")
                 return None
             
-            # Extract images
+            # Extract and format the details - matching Wanted Cars format
+            date_published = listing.get("date_published", "")
+            relative_date = self.format_relative_date(date_published) if date_published else "Unknown"
             images = listing.get("images", [])
             
-            # Get date information
-            date_published = listing.get("date_published")
-            relative_date = self.format_relative_date(date_published) if date_published else "Unknown"
-            
-            # Extract attributes with better formatting
-            attrs_and_vals = listing.get("attrsAndVals", [])
-            attributes = self.extract_attributes(attrs_and_vals)
-            
-            # Return detailed listing information
-            result = {
+            details = {
                 "id": listing.get("user_adv_id"),
                 "slug": listing.get("slug"),
                 "title": listing.get("title"),
@@ -354,33 +309,57 @@ class GiftsJsonScraper:
                 "category": listing.get("category", {}).get("name"),
                 "status": status,
             }
-            # Add attributes (both nested columns and flattened individual columns)
-            result.update(attributes)
             
-            return result
+            return details
             
         except Exception as e:
-            logger.error(f"Error getting listing details for {slug}: {e}")
+            logger.error(f"Error getting listing details for {listing_slug}: {e}")
             return None
     
     async def download_image(self, image_url: str) -> Optional[bytes]:
         """
-        Download image from URL
+        Download image data from URL
         
         Args:
             image_url: URL of the image
         
         Returns:
-            Image bytes or None if failed
+            Image data or None if failed
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url, timeout=30) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        logger.warning(f"Failed to download image {image_url}: Status {response.status}")
-                        return None
+            response = self.session.get(image_url, timeout=60)
+            response.raise_for_status()
+            return response.content
         except Exception as e:
-            logger.error(f"Error downloading image {image_url}: {e}")
+            logger.warning(f"Failed to download image from {image_url}: {e}")
             return None
+    
+    def format_relative_date(self, date_str: str) -> str:
+        """
+        Format a date string to relative format (e.g., '2 days ago')
+        
+        Args:
+            date_str: Date string in format 'YYYY-MM-DD HH:MM:SS'
+        
+        Returns:
+            Relative date string
+        """
+        try:
+            published = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            now = datetime.now()
+            diff = relativedelta(now, published)
+            
+            if diff.years > 0:
+                return f"{diff.years} year{'s' if diff.years > 1 else ''} ago"
+            if diff.months > 0:
+                return f"{diff.months} month{'s' if diff.months > 1 else ''} ago"
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
+            if diff.hours > 0:
+                return f"{diff.hours} hour{'s' if diff.hours > 1 else ''} ago"
+            if diff.minutes > 0:
+                return f"{diff.minutes} minute{'s' if diff.minutes > 1 else ''} ago"
+            return "Just now"
+        except Exception as e:
+            logger.warning(f"Error formatting date {date_str}: {e}")
+            return "Unknown"

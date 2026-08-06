@@ -17,7 +17,7 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
+    Partitions data by date: camping/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -69,7 +69,7 @@ class R2Helper:
     def get_partition_prefix(self, target_date: datetime = None) -> str:
         """
         Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Format: 4sale-data/camping/year=YYYY/month=MM/day=DD/
         
         Args:
             target_date: Date to partition by (defaults to yesterday)
@@ -85,7 +85,7 @@ class R2Helper:
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/camping/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
                     target_date: datetime = None, retries: int = 3) -> Optional[str]:

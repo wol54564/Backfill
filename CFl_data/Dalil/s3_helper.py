@@ -3,8 +3,11 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import mimetypes
+import requests
+import asyncio
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,7 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
+    Partitions data by date: 4sale-data/Dalil/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -60,7 +63,7 @@ class R2Helper:
             except Exception as e:
                 # HeadBucket might fail due to IAM permissions, but we can still proceed
                 logger.warning(f"Could not verify bucket access (this may be due to IAM permissions): {e}")
-                logger.info(f"Proceeding with R2 client - bucket: {self.bucket_name}, profile: {profile_name}")
+                logger.info(f"Proceeding with R2 client - bucket: {self.bucket_name}")
             
         except Exception as e:
             logger.error(f"Failed to initialize R2 client: {e}")
@@ -69,23 +72,22 @@ class R2Helper:
     def get_partition_prefix(self, target_date: datetime = None) -> str:
         """
         Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Format: 4sale-data/Dalil/year=YYYY/month=MM/day=DD/
         
         Args:
-            target_date: Date to partition by (defaults to yesterday)
+            target_date: Date to partition by (defaults to today)
         
         Returns:
             Partition prefix string
         """
         if target_date is None:
-            from datetime import timedelta
-            target_date = datetime.now() - timedelta(days=1)
+            target_date = datetime.now()
         
         year = target_date.strftime('%Y')
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/Dalil/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
                     target_date: datetime = None, retries: int = 3) -> Optional[str]:
@@ -95,7 +97,7 @@ class R2Helper:
         Args:
             local_file_path: Path to local file
             R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
             retries: Number of retry attempts
         
         Returns:
@@ -144,7 +146,7 @@ class R2Helper:
         Args:
             file_obj: File-like object
             R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
             retries: Number of retry attempts
         
         Returns:
@@ -162,11 +164,7 @@ class R2Helper:
                     if content_type is None:
                         content_type = "application/octet-stream"
                 
-                logger.info(f"UPLOADING TO R2 (attempt {attempt + 1}/{retries}): R2://{self.bucket_name}/{R2_key}")
-                
-                # Reset file pointer
-                if hasattr(file_obj, 'seek'):
-                    file_obj.seek(0)
+                logger.info(f"Uploading file object to R2 (attempt {attempt + 1}/{retries}): {R2_key}")
                 
                 self.R2_client.upload_fileobj(
                     file_obj,
@@ -181,87 +179,75 @@ class R2Helper:
             except Exception as e:
                 logger.warning(f"Upload attempt {attempt + 1} failed: {e}")
                 if attempt == retries - 1:
-                    logger.error(f"Failed to upload after {retries} attempts: {R2_filename}")
+                    logger.error(f"Failed to upload after {retries} attempts")
                     return None
         
         return None
     
-    def upload_json_data(self, data: dict, R2_filename: str, 
-                        target_date: datetime = None, retries: int = 3) -> Optional[str]:
+    async def download_and_upload_image(self, image_url: str, R2_path: str, 
+                                       target_date: datetime = None, 
+                                       retries: int = 3) -> Optional[str]:
         """
-        Upload JSON data directly to R2
+        Download an image from URL and Upload to R2
         
         Args:
-            data: Dictionary to upload as JSON
-            R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            image_url: URL of the image to download
+            R2_path: R2 path (relative, without partition)
+            target_date: Date for partitioning
             retries: Number of retry attempts
         
         Returns:
             Full R2 path or None if failed
         """
-        import json
-        from io import BytesIO
-        
         partition = self.get_partition_prefix(target_date)
-        R2_key = f"{partition}/{R2_filename}"
+        R2_key = f"{partition}/{R2_path}"
         
         for attempt in range(retries):
             try:
-                json_data = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
-                file_obj = BytesIO(json_data)
+                # Download image
+                response = requests.get(image_url, timeout=30, stream=True)
+                response.raise_for_status()
                 
-                logger.info(f"Uploading JSON to R2 (attempt {attempt + 1}/{retries}): R2://{self.bucket_name}/{R2_key}")
+                # Determine content type from response or URL
+                content_type = response.headers.get('Content-Type', 'image/jpeg')
                 
+                # Upload to R2
                 self.R2_client.upload_fileobj(
-                    file_obj,
+                    response.raw,
                     self.bucket_name,
                     R2_key,
-                    ExtraArgs={'ContentType': 'application/json'}
+                    ExtraArgs={'ContentType': content_type}
                 )
                 
-                logger.info(f"Successfully uploaded: {R2_key}")
+                logger.debug(f"Uploaded image to R2: {R2_key}")
                 return R2_key
                 
             except Exception as e:
-                logger.warning(f"Upload attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Image upload attempt {attempt + 1} failed for {image_url}: {e}")
                 if attempt == retries - 1:
-                    logger.error(f"Failed to upload after {retries} attempts: {R2_filename}")
+                    logger.error(f"Failed to upload image after {retries} attempts: {image_url}")
                     return None
+                
+                await asyncio.sleep(1)  # Wait before retry
         
         return None
     
-    def get_R2_url(self, R2_key: str) -> str:
+    def list_files(self, prefix: str = "", max_keys: int = 1000) -> List[str]:
         """
-        Get public URL for an R2 object
+        List files in R2 bucket with optional prefix
         
         Args:
-            R2_key: R2 key (path) to the object
-        
-        Returns:
-            Public R2 URL
-        """
-        _ep = CF_R2_ENDPOINT_URL.rstrip("/").removesuffix("/" + self.bucket_name)
-        return f"{_ep}/{self.bucket_name}/{R2_key}"
-    
-    def list_files(self, prefix: str = None, target_date: datetime = None) -> list:
-        """
-        List files in R2 with optional partitioning
-        
-        Args:
-            prefix: Custom prefix (if not provided, uses date partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            prefix: R2 prefix to filter by
+            max_keys: Maximum number of keys to return
         
         Returns:
             List of R2 keys
         """
-        if prefix is None:
-            prefix = self.get_partition_prefix(target_date)
-        
         try:
             response = self.R2_client.list_objects_v2(
                 Bucket=self.bucket_name,
-                Prefix=prefix
+                Prefix=prefix,
+                MaxKeys=max_keys
             )
             
             if 'Contents' not in response:
@@ -270,127 +256,90 @@ class R2Helper:
             return [obj['Key'] for obj in response['Contents']]
             
         except Exception as e:
-            logger.error(f"Error listing files: {e}")
+            logger.error(f"Error listing files with prefix {prefix}: {e}")
             return []
+    
+    def file_exists(self, R2_key: str) -> bool:
+        """
+        Check if a file exists in R2
+        
+        Args:
+            R2_key: Full R2 key
+        
+        Returns:
+            True if file exists, False otherwise
+        """
+        try:
+            self.R2_client.head_object(Bucket=self.bucket_name, Key=R2_key)
+            return True
+        except:
+            return False
     
     def delete_file(self, R2_key: str) -> bool:
         """
         Delete a file from R2
         
         Args:
-            R2_key: R2 key (path) to the object
+            R2_key: Full R2 key
         
         Returns:
             True if successful, False otherwise
         """
         try:
             self.R2_client.delete_object(Bucket=self.bucket_name, Key=R2_key)
-            logger.info(f"Successfully deleted: {R2_key}")
+            logger.info(f"Deleted: {R2_key}")
             return True
         except Exception as e:
-            logger.error(f"Error deleting file: {e}")
+            logger.error(f"Error deleting {R2_key}: {e}")
             return False
     
-    def upload_image(self, image_url: str, image_data: bytes, subcategory_slug: str,
-                     target_date: datetime = None, listing_id: Optional[str] = None, 
-                     image_index: int = 0) -> Optional[str]:
+    def generate_presigned_url(self, R2_key: str, expiration: int = 3600) -> Optional[str]:
         """
-        Upload image bytes to R2 with ID-based naming
+        Generate a presigned URL for an R2 object
         
         Args:
-            image_url: Original image URL
-            image_data: Image bytes to upload
-            subcategory_slug: Category slug for organization
-            target_date: Date for partitioning
-            listing_id: Listing ID for image naming (if provided, image will be named as listing_id_index.jpg)
-            image_index: Index of image in the list (0, 1, 2, etc.)
+            R2_key: Full R2 key
+            expiration: URL expiration time in seconds (default: 1 hour)
         
         Returns:
-            Full R2 path or None if failed
+            Presigned URL or None if failed
         """
         try:
-            # Generate filename based on listing_id if provided
-            if listing_id:
-                filename = f"{listing_id}_{image_index}.jpg"
-            else:
-                # Fallback: extract filename from URL
-                filename = image_url.split('/')[-1]
-                if not filename:
-                    filename = f"image_{int(__import__('time').time())}.jpg"
-            
-            partition = self.get_partition_prefix(target_date)
-            R2_key = f"{partition}/images/{subcategory_slug}/{filename}"
-            
-            logger.info(f"Uploading image: {filename}")
-            logger.info(f"Full R2 path: r2://{self.bucket_name}/{R2_key}")
-            
-            for attempt in range(3):
-                try:
-                    self.R2_client.put_object(
-                        Bucket=self.bucket_name,
-                        Key=R2_key,
-                        Body=image_data,
-                        ContentType='image/jpeg'
-                    )
-                    
-                    logger.info(f"[OK] Successfully uploaded: {filename}")
-                    return R2_key
-                    
-                except Exception as e:
-                    logger.warning(f"Image upload attempt {attempt + 1} failed: {e}")
-                    if attempt < 2:
-                        import time
-                        time.sleep(1)
-            
-            return None
-            
+            url = self.R2_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket_name, 'Key': R2_key},
+                ExpiresIn=expiration
+            )
+            return url
         except Exception as e:
-            logger.error(f"Error uploading image {image_url}: {e}")
+            logger.error(f"Error generating presigned URL for {R2_key}: {e}")
             return None
     
     def generate_R2_url(self, R2_key: str) -> str:
         """
-        Generate public R2 URL for a key
+        Generate a standard R2 URL (not presigned)
         
         Args:
-            R2_key: R2 object key
+            R2_key: Full R2 key
         
         Returns:
-            Full R2 URL
+            R2 URL
         """
-        _ep = CF_R2_ENDPOINT_URL.rstrip("/").removesuffix("/" + self.bucket_name)
-        return f"{_ep}/{self.bucket_name}/{R2_key}"
+        return f"r2://{self.bucket_name}/{R2_key}"
     
-    def list_files_in_partition(self, prefix: str = None, target_date: datetime = None) -> list:
+    def get_file_size(self, R2_key: str) -> Optional[int]:
         """
-        List all files in a partition
+        Get file size in bytes
         
         Args:
-            prefix: Additional prefix to search (relative to partition)
-            target_date: Date for partition (defaults to yesterday)
+            R2_key: Full R2 key
         
         Returns:
-            List of file keys
+            File size in bytes or None if failed
         """
-        partition = self.get_partition_prefix(target_date)
-        if prefix:
-            full_prefix = f"{partition}/{prefix}"
-        else:
-            full_prefix = partition
-        
         try:
-            response = self.R2_client.list_objects_v2(
-                Bucket=self.bucket_name,
-                Prefix=full_prefix
-            )
-            
-            files = []
-            if 'Contents' in response:
-                files = [obj['Key'] for obj in response['Contents']]
-            
-            logger.info(f"Found {len(files)} files in partition {full_prefix}")
-            return files
-            
+            response = self.R2_client.head_object(Bucket=self.bucket_name, Key=R2_key)
+            return response['ContentLength']
         except Exception as e:
-            logger.error(f"Error listing files: {e}")
-            return []
+            logger.error(f"Error getting file size for {R2_key}: {e}")
+            return None

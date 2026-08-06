@@ -17,7 +17,7 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
+    Partitions data by date: services/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -69,7 +69,7 @@ class R2Helper:
     def get_partition_prefix(self, target_date: datetime = None) -> str:
         """
         Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Format: services/year=YYYY/month=MM/day=DD/
         
         Args:
             target_date: Date to partition by (defaults to yesterday)
@@ -85,7 +85,7 @@ class R2Helper:
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/contracting/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
                     target_date: datetime = None, retries: int = 3) -> Optional[str]:
@@ -106,17 +106,12 @@ class R2Helper:
         
         for attempt in range(retries):
             try:
-                local_path = Path(local_file_path)
-                if not local_path.exists():
-                    logger.error(f"Local file not found: {local_file_path}")
-                    return None
+                logger.info(f"Uploading {local_file_path} to R2://{self.bucket_name}/{R2_key}")
                 
-                # Determine content type
+                # Detect content type
                 content_type, _ = mimetypes.guess_type(local_file_path)
-                if content_type is None:
-                    content_type = "application/octet-stream"
-                
-                logger.info(f"UPLOADING TO R2 (attempt {attempt + 1}/{retries}): R2://{self.bucket_name}/{R2_key}")
+                if not content_type:
+                    content_type = 'application/octet-stream'
                 
                 self.R2_client.upload_file(
                     local_file_path,
@@ -125,171 +120,17 @@ class R2Helper:
                     ExtraArgs={'ContentType': content_type}
                 )
                 
-                logger.info(f"Successfully uploaded: {R2_key}")
+                logger.info(f"Successfully Uploaded to R2://{self.bucket_name}/{R2_key}")
                 return R2_key
                 
             except Exception as e:
                 logger.warning(f"Upload attempt {attempt + 1} failed: {e}")
-                if attempt == retries - 1:
-                    logger.error(f"Failed to upload after {retries} attempts: {local_file_path}")
+                if attempt < retries - 1:
+                    import time
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"Failed to upload {local_file_path} after {retries} attempts")
                     return None
-        
-        return None
-    
-    def upload_file_obj(self, file_obj, R2_filename: str, 
-                       target_date: datetime = None, retries: int = 3) -> Optional[str]:
-        """
-        Upload a file object to R2 with automatic partitioning
-        
-        Args:
-            file_obj: File-like object
-            R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
-            retries: Number of retry attempts
-        
-        Returns:
-            Full R2 path or None if failed
-        """
-        partition = self.get_partition_prefix(target_date)
-        R2_key = f"{partition}/{R2_filename}"
-        
-        for attempt in range(retries):
-            try:
-                # Determine content type
-                content_type = "application/octet-stream"
-                if hasattr(file_obj, 'name'):
-                    content_type, _ = mimetypes.guess_type(file_obj.name)
-                    if content_type is None:
-                        content_type = "application/octet-stream"
-                
-                logger.info(f"UPLOADING TO R2 (attempt {attempt + 1}/{retries}): R2://{self.bucket_name}/{R2_key}")
-                
-                # Reset file pointer
-                if hasattr(file_obj, 'seek'):
-                    file_obj.seek(0)
-                
-                self.R2_client.upload_fileobj(
-                    file_obj,
-                    self.bucket_name,
-                    R2_key,
-                    ExtraArgs={'ContentType': content_type}
-                )
-                
-                logger.info(f"Successfully uploaded: {R2_key}")
-                return R2_key
-                
-            except Exception as e:
-                logger.warning(f"Upload attempt {attempt + 1} failed: {e}")
-                if attempt == retries - 1:
-                    logger.error(f"Failed to upload after {retries} attempts: {R2_filename}")
-                    return None
-        
-        return None
-    
-    def upload_json_data(self, data: dict, R2_filename: str, 
-                        target_date: datetime = None, retries: int = 3) -> Optional[str]:
-        """
-        Upload JSON data directly to R2
-        
-        Args:
-            data: Dictionary to upload as JSON
-            R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
-            retries: Number of retry attempts
-        
-        Returns:
-            Full R2 path or None if failed
-        """
-        import json
-        from io import BytesIO
-        
-        partition = self.get_partition_prefix(target_date)
-        R2_key = f"{partition}/{R2_filename}"
-        
-        for attempt in range(retries):
-            try:
-                json_data = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
-                file_obj = BytesIO(json_data)
-                
-                logger.info(f"Uploading JSON to R2 (attempt {attempt + 1}/{retries}): R2://{self.bucket_name}/{R2_key}")
-                
-                self.R2_client.upload_fileobj(
-                    file_obj,
-                    self.bucket_name,
-                    R2_key,
-                    ExtraArgs={'ContentType': 'application/json'}
-                )
-                
-                logger.info(f"Successfully uploaded: {R2_key}")
-                return R2_key
-                
-            except Exception as e:
-                logger.warning(f"Upload attempt {attempt + 1} failed: {e}")
-                if attempt == retries - 1:
-                    logger.error(f"Failed to upload after {retries} attempts: {R2_filename}")
-                    return None
-        
-        return None
-    
-    def get_R2_url(self, R2_key: str) -> str:
-        """
-        Get public URL for an R2 object
-        
-        Args:
-            R2_key: R2 key (path) to the object
-        
-        Returns:
-            Public R2 URL
-        """
-        _ep = CF_R2_ENDPOINT_URL.rstrip("/").removesuffix("/" + self.bucket_name)
-        return f"{_ep}/{self.bucket_name}/{R2_key}"
-    
-    def list_files(self, prefix: str = None, target_date: datetime = None) -> list:
-        """
-        List files in R2 with optional partitioning
-        
-        Args:
-            prefix: Custom prefix (if not provided, uses date partition)
-            target_date: Date for partitioning (defaults to yesterday)
-        
-        Returns:
-            List of R2 keys
-        """
-        if prefix is None:
-            prefix = self.get_partition_prefix(target_date)
-        
-        try:
-            response = self.R2_client.list_objects_v2(
-                Bucket=self.bucket_name,
-                Prefix=prefix
-            )
-            
-            if 'Contents' not in response:
-                return []
-            
-            return [obj['Key'] for obj in response['Contents']]
-            
-        except Exception as e:
-            logger.error(f"Error listing files: {e}")
-            return []
-    
-    def delete_file(self, R2_key: str) -> bool:
-        """
-        Delete a file from R2
-        
-        Args:
-            R2_key: R2 key (path) to the object
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            self.R2_client.delete_object(Bucket=self.bucket_name, Key=R2_key)
-            logger.info(f"Successfully deleted: {R2_key}")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting file: {e}")
-            return False
     
     def upload_image(self, image_url: str, image_data: bytes, subcategory_slug: str,
                      target_date: datetime = None, listing_id: Optional[str] = None, 
@@ -394,3 +235,24 @@ class R2Helper:
         except Exception as e:
             logger.error(f"Error listing files: {e}")
             return []
+    
+    def delete_file(self, R2_key: str) -> bool:
+        """
+        Delete a file from R2
+        
+        Args:
+            R2_key: R2 object key
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.R2_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=R2_key
+            )
+            logger.info(f"Deleted {R2_key}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting {R2_key}: {e}")
+            return False

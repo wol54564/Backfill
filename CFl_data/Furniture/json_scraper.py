@@ -16,15 +16,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class FurnitureJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
-    This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    Scrapes Q84Sale furniture listings using JSON data from __NEXT_DATA__ script tag
+    Handles subcategories with 3 cases:
+    - Case 1: Main page + district pages (category_type: listings_district_filteration)
+    - Case 2: Direct listings (category_type: listings)
+    - Case 3: CatChilds (category has catChilds array)
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/furniture"
         self.session = create_session()
         
     async def init_browser(self):
@@ -65,11 +67,11 @@ class GiftsJsonScraper:
     
     async def get_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all subcategories from the furniture main page
+        Returns verticalSubcats from the furniture page
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching furniture subcategories...")
             url = self.base_url
             json_data = await self.get_page_json_data(url)
             
@@ -85,7 +87,7 @@ class GiftsJsonScraper:
             )
             
             if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+                logger.warning("No verticalSubcats found in furniture page")
                 return []
             
             subcategories = []
@@ -96,16 +98,14 @@ class GiftsJsonScraper:
                     "name_ar": subcat.get("name_ar"),
                     "name_en": subcat.get("name_en"),
                     "listings_count": subcat.get("listings_count"),
+                    "category_type": subcat.get("category_type"),
                     "parent_slug": subcat.get("category_parent_slug"),
                     "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
                 })
             
             logger.info(f"Found {len(subcategories)} subcategories")
             for subcat in subcategories:
-                logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings")
+                logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - Type: {subcat['category_type']} - {subcat['listings_count']} listings")
             
             return subcategories
             
@@ -113,23 +113,107 @@ class GiftsJsonScraper:
             logger.error(f"Error getting subcategories: {e}")
             return []
     
-    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
-                          filter_yesterday: bool = False) -> tuple:
+    async def get_districts(self, subcategory_slug: str) -> List[Dict]:
         """
-        Get all listings for a specific gifts subcategory
+        Get districts for a subcategory (Case 1)
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            subcategory_slug: The slug of the category
+        
+        Returns:
+            List of districts
+        """
+        try:
+            url = f"{self.base_url}/{subcategory_slug}/1"
+            logger.info(f"Fetching districts for {subcategory_slug}...")
+            
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                return []
+            
+            districts = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("districts", [])
+            )
+            
+            if districts:
+                logger.info(f"Found {len(districts)} districts for {subcategory_slug}")
+                for dist in districts:
+                    logger.info(f"  - {dist.get('name_ar')} ({dist.get('full_path_en')})")
+            
+            return districts
+            
+        except Exception as e:
+            logger.error(f"Error getting districts for {subcategory_slug}: {e}")
+            return []
+    
+    async def get_catchilds(self, subcategory_slug: str) -> List[Dict]:
+        """
+        Get catChilds for a subcategory (Case 3)
+        
+        Args:
+            subcategory_slug: The slug of the category
+        
+        Returns:
+            List of catChilds
+        """
+        try:
+            url = f"{self.base_url}/{subcategory_slug}/1"
+            logger.info(f"Fetching catChilds for {subcategory_slug}...")
+            
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                return []
+            
+            cat_childs = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("catChilds", [])
+            )
+            
+            if cat_childs:
+                logger.info(f"Found {len(cat_childs)} catChilds for {subcategory_slug}")
+                for child in cat_childs:
+                    logger.info(f"  - {child.get('name_ar')} ({child.get('slug')}) - {child.get('listings_count')} listings")
+            
+            return cat_childs
+            
+        except Exception as e:
+            logger.error(f"Error getting catChilds for {subcategory_slug}: {e}")
+            return []
+    
+    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
+                          filter_yesterday: bool = False, district_slug: str = None,
+                          catchild_slug: str = None) -> tuple:
+        """
+        Get all listings for a specific furniture subcategory
+        
+        Args:
+            subcategory_slug: The slug of the category
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
+            district_slug: District slug for Case 1 (e.g., 'ahmadi--district')
+            catchild_slug: CatChild slug for Case 3 (e.g., 'curtains')
         
         Returns:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
-            url = f"{self.base_url}/{subcategory_slug}/{page_num}"
-            logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
+            # Build URL based on case
+            if catchild_slug:
+                # Case 3: furniture/textiles/curtains/1
+                url = f"{self.base_url}/{subcategory_slug}/{catchild_slug}/{page_num}"
+            elif district_slug:
+                # Case 1: furniture/wanted-furniture/1/ahmadi--district
+                url = f"{self.base_url}/{subcategory_slug}/{page_num}/{district_slug}"
+            else:
+                # Case 1 (main) or Case 2: furniture/wanted-furniture/1 or furniture/bedrooms/1
+                url = f"{self.base_url}/{subcategory_slug}/{page_num}"
+            
+            logger.info(f"Fetching listings from {url}...")
             
             json_data = await self.get_page_json_data(url)
             
@@ -182,7 +266,7 @@ class GiftsJsonScraper:
             return formatted_listings, total_pages
             
         except Exception as e:
-            logger.error(f"Error getting listings for {subcategory_slug}: {e}")
+            logger.error(f"Error getting listings: {e}")
             return [], 0
     
     def format_relative_date(self, date_str: str) -> str:
@@ -279,10 +363,10 @@ class GiftsJsonScraper:
     async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
         """
         Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
+        Uses the slug to construct the URL
         
         Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
+            slug: Listing slug
             status: Listing status (normal/pinned etc.)
         
         Returns:

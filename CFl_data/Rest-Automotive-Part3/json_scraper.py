@@ -16,15 +16,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class RestAutomotiveJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
-    This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    Scrapes Q84Sale automotive businesses and car rental listings using JSON data from __NEXT_DATA__ script tag
+    Handles three different URL structures:
+    1. Businesses (dealerships, car-offices, car-garages): businessesData structure
+    2. Car Rental: subcategories structure
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_urls = {
+            "dealerships": "https://www.q84sale.com/ar/businesses/dealerships",
+            "car-offices": "https://www.q84sale.com/ar/businesses/car-offices",
+            "car-garages": "https://www.q84sale.com/ar/businesses/car-garages-1",
+            "car-rental": "https://www.q84sale.com/ar/automotive/car-rental"
+        }
         self.session = create_session()
         
     async def init_browser(self):
@@ -63,63 +69,119 @@ class GiftsJsonScraper:
             logger.error(f"Error fetching JSON from {url}: {e}")
             return None
     
-    async def get_subcategories(self) -> List[Dict]:
+    async def get_businesses(self, category_type: str) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all businesses from dealerships or car-offices
+        Returns businessesData from the main page
+        
+        Args:
+            category_type: "dealerships" or "car-offices"
+        
+        Returns:
+            List of business dictionaries
         """
         try:
-            logger.info("Fetching gifts subcategories...")
-            url = self.base_url
+            logger.info(f"Fetching {category_type} businesses...")
+            url = self.base_urls[category_type]
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
-                logger.error("Failed to fetch main page JSON")
+                logger.error(f"Failed to fetch {category_type} page JSON")
                 return []
             
-            # Extract verticalSubcats from the JSON structure
-            vertical_subcats = (
+            # Extract businessesData from the JSON structure
+            businesses_data = (
                 json_data.get("props", {})
                 .get("pageProps", {})
-                .get("verticalSubcats", [])
+                .get("businessesData", {})
+                .get("data", [])
             )
             
-            if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+            if not businesses_data:
+                logger.warning(f"No businessesData found in {category_type} page")
+                return []
+            
+            businesses = []
+            for business in businesses_data:
+                businesses.append({
+                    "id": business.get("id"),
+                    "slug": business.get("slug"),
+                    "name": business.get("name"),
+                    "logo": business.get("logo"),
+                    "category_type": category_type
+                })
+            
+            logger.info(f"Found {len(businesses)} businesses in {category_type}")
+            for biz in businesses:
+                logger.info(f"  - {biz['name']} ({biz['slug']})")
+            
+            return businesses
+            
+        except Exception as e:
+            logger.error(f"Error getting {category_type} businesses: {e}")
+            return []
+    
+    async def get_subcategories(self, category_type: str = "car-rental") -> List[Dict]:
+        """
+        Get all subcategories from car-rental
+        Returns subcategories from the main page
+        
+        Args:
+            category_type: "car-rental"
+        
+        Returns:
+            List of subcategory dictionaries
+        """
+        try:
+            logger.info(f"Fetching {category_type} subcategories...")
+            url = self.base_urls[category_type]
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.error(f"Failed to fetch {category_type} page JSON")
+                return []
+            
+            # Extract subcategories from the JSON structure
+            subcategories_data = (
+                json_data.get("props", {})
+                .get("pageProps", {})
+                .get("subcategories", [])
+            )
+            
+            if not subcategories_data:
+                logger.warning(f"No subcategories found in {category_type} page")
                 return []
             
             subcategories = []
-            for subcat in vertical_subcats:
+            for subcat in subcategories_data:
                 subcategories.append({
                     "id": subcat.get("id"),
                     "slug": subcat.get("slug"),
                     "name_ar": subcat.get("name_ar"),
                     "name_en": subcat.get("name_en"),
                     "listings_count": subcat.get("listings_count"),
-                    "parent_slug": subcat.get("category_parent_slug"),
+                    "category_type": category_type,
                     "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
                 })
             
-            logger.info(f"Found {len(subcategories)} subcategories")
+            logger.info(f"Found {len(subcategories)} subcategories in {category_type}")
             for subcat in subcategories:
                 logger.info(f"  - {subcat['name_ar']} ({subcat['slug']}) - {subcat['listings_count']} listings")
             
             return subcategories
             
         except Exception as e:
-            logger.error(f"Error getting subcategories: {e}")
+            logger.error(f"Error getting {category_type} subcategories: {e}")
             return []
     
-    async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
-                          filter_yesterday: bool = False) -> tuple:
+    async def get_business_listings(self, business_slug: str, category_type: str, page_num: int = 1,
+                                   filter_yesterday: bool = False) -> tuple:
         """
-        Get all listings for a specific gifts subcategory
+        Get all listings for a specific business (dealerships, car-offices, or car-garages)
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            business_slug: The slug of the business (e.g., 'kuwait-finance-house-377')
+            category_type: "dealerships", "car-offices", or "car-garages"
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,8 +189,87 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
-            url = f"{self.base_url}/{subcategory_slug}/{page_num}"
+            # Build URL for business listings page
+            # Extract the URL path from base_urls to handle special cases like car-garages-1
+            # Format: https://www.q84sale.com/ar/businesses/car-offices/shoneez-general-trading-co.-6/all
+            base_url = self.base_urls.get(category_type, "")
+            if not base_url:
+                logger.error(f"Unknown category type: {category_type}")
+                return [], 0
+            
+            # Extract the path part after /businesses/
+            url_path = base_url.split("/businesses/")[1] if "/businesses/" in base_url else category_type
+            url = f"https://www.q84sale.com/ar/businesses/{url_path}/{business_slug}/all"
+            logger.info(f"Fetching listings for {business_slug} (page {page_num})...")
+            
+            json_data = await self.get_page_json_data(url)
+            
+            if not json_data:
+                logger.warning(f"No data found for {url}")
+                return [], 0
+            
+            # Extract businessListings from the JSON structure
+            page_props = json_data.get("props", {}).get("pageProps", {})
+            business_listings_data = page_props.get("businessListings", {}).get("data", {})
+            
+            # For business listings, pagination is handled differently
+            # They don't have totalPages like regular listings
+            all_listings = business_listings_data.get("listings", {}).get("normal_items", [])
+            
+            # Get yesterday's date for filtering
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            
+            formatted_listings = []
+            for listing in all_listings:
+                # Filter by yesterday if requested
+                if filter_yesterday:
+                    date_published = listing.get("date_published", "")
+                    if not date_published.startswith(yesterday):
+                        continue
+                
+                formatted_listings.append({
+                    "id": listing.get("id"),
+                    "title": listing.get("title"),
+                    "slug": listing.get("slug"),
+                    "price": listing.get("price"),
+                    "image": listing.get("image"),
+                    "date_published": listing.get("date_published"),
+                    "cat_id": listing.get("cat_id"),
+                    "cat_name_en": listing.get("cat_en_name"),
+                    "cat_name_ar": listing.get("cat_ar_name"),
+                    "phone": listing.get("phone"),
+                    "contact": listing.get("contact"),
+                    "status": listing.get("status"),
+                    "images_count": listing.get("images_count"),
+                    "description": listing.get("description"),
+                    "user_type": listing.get("user_type"),
+                })
+            
+            logger.info(f"Found {len(formatted_listings)} listings for {business_slug}")
+            # Business listings are typically single page, so total_pages = 1
+            return formatted_listings, 1
+            
+        except Exception as e:
+            logger.error(f"Error getting listings for {business_slug}: {e}")
+            return [], 0
+    
+    async def get_rental_listings(self, subcategory_slug: str, page_num: int = 1,
+                                 filter_yesterday: bool = False) -> tuple:
+        """
+        Get all listings for a specific car-rental subcategory
+        
+        Args:
+            subcategory_slug: The slug of the subcategory (e.g., 'infiniti-car-rental')
+            page_num: Page number (default 1)
+            filter_yesterday: If True, only returns listings from yesterday
+        
+        Returns:
+            Tuple of (listings, total_pages)
+        """
+        try:
+            # Build URL using the car-rental parent slug and page number
+            # Format: https://www.q84sale.com/ar/automotive/car-rental/infiniti-car-rental/1
+            url = f"https://www.q84sale.com/ar/automotive/car-rental/{subcategory_slug}/{page_num}"
             logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
             
             json_data = await self.get_page_json_data(url)
@@ -137,11 +278,9 @@ class GiftsJsonScraper:
                 logger.warning(f"No data found for {url}")
                 return [], 0
             
-            # Extract totalPages from the JSON response
+            # Extract totalPages and listings from the JSON response
             page_props = json_data.get("props", {}).get("pageProps", {})
             total_pages = page_props.get("totalPages", 0)
-            
-            # Extract listings from the JSON structure
             listings = page_props.get("listings", [])
             
             # Get yesterday's date for filtering
@@ -163,7 +302,7 @@ class GiftsJsonScraper:
                     "id": listing.get("id"),
                     "title": listing.get("title"),
                     "slug": listing.get("slug"),
-                    "price": listing.get("price"),
+                    "price": listing.get("price", 0),
                     "image": listing.get("image"),
                     "date_published": listing.get("date_published"),
                     "cat_id": listing.get("cat_id"),
@@ -173,9 +312,12 @@ class GiftsJsonScraper:
                     "user_name": listing.get("user", {}).get("name"),
                     "phone": listing.get("phone"),
                     "contact_no": listing.get("contact_no"),
+                    "contact": listing.get("contact"),
                     "district_name": listing.get("district_name"),
                     "status": listing.get("status"),
                     "images_count": listing.get("images_count"),
+                    "user_type": listing.get("user_type"),
+                    "description": listing.get("desc_ar", ""),
                 })
             
             logger.info(f"Found {len(formatted_listings)} listings on page {page_num} (Total Pages: {total_pages})")
@@ -244,7 +386,7 @@ class GiftsJsonScraper:
             
             # Handle different value types
             if isinstance(val, dict):
-                # Dictionary values (e.g., location objects)
+                # Dictionary values (e.g., drop_down options)
                 value_en = val.get("name_en")
                 value_ar = val.get("name_ar")
             elif isinstance(val, str):
@@ -279,10 +421,10 @@ class GiftsJsonScraper:
     async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
         """
         Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
+        Uses the slug to construct the URL
         
         Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
+            slug: Listing slug (e.g., 'mercedes-benz-gls-450-20493698')
             status: Listing status (normal/pinned etc.)
         
         Returns:
@@ -328,6 +470,7 @@ class GiftsJsonScraper:
                 "description": listing.get("description"),
                 "price": listing.get("price"),
                 "phone": listing.get("phone"),
+                "contacts": ",".join(listing.get("contacts", [])),
                 "date_published": date_published,
                 "date_relative": relative_date,
                 "date_created": listing.get("date_created"),
@@ -352,6 +495,10 @@ class GiftsJsonScraper:
                 "is_private_message_enabled": listing.get("is_private_message_enabled"),
                 "is_hide_my_number": listing.get("is_hide_my_number"),
                 "category": listing.get("category", {}).get("name"),
+                "category_breadcrumb": " > ".join([b.get("val", "") for b in listing.get("category", {}).get("breadcrumb", [])]),
+                "business_profile_slug": listing.get("business_profile_slug"),
+                "business_category_slug": listing.get("business_category_slug"),
+                "referer_url": listing.get("refererURL"),
                 "status": status,
             }
             # Add attributes (both nested columns and flattened individual columns)

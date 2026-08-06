@@ -17,7 +17,6 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -66,13 +65,14 @@ class R2Helper:
             logger.error(f"Failed to initialize R2 client: {e}")
             raise
     
-    def get_partition_prefix(self, target_date: datetime = None) -> str:
+    def get_partition_prefix(self, target_date: datetime = None, folder_name: str = "rest-automotive-part1") -> str:
         """
-        Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Get R2 partition prefix based on date and folder name
+        Format: 4sale-data/{folder_name}/year=YYYY/month=MM/day=DD/
         
         Args:
             target_date: Date to partition by (defaults to yesterday)
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
         
         Returns:
             Partition prefix string
@@ -85,10 +85,10 @@ class R2Helper:
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/{folder_name}/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
-                    target_date: datetime = None, retries: int = 3) -> Optional[str]:
+                    target_date: datetime = None, retries: int = 3, folder_name: str = "rest-automotive-part1") -> Optional[str]:
         """
         Upload a file to R2 with automatic partitioning
         
@@ -97,11 +97,12 @@ class R2Helper:
             R2_filename: Filename in R2 (relative path without partition)
             target_date: Date for partitioning (defaults to yesterday)
             retries: Number of retry attempts
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
         
         Returns:
             Full R2 path or None if failed
         """
-        partition = self.get_partition_prefix(target_date)
+        partition = self.get_partition_prefix(target_date, folder_name)
         R2_key = f"{partition}/{R2_filename}"
         
         for attempt in range(retries):
@@ -137,7 +138,7 @@ class R2Helper:
         return None
     
     def upload_file_obj(self, file_obj, R2_filename: str, 
-                       target_date: datetime = None, retries: int = 3) -> Optional[str]:
+                       target_date: datetime = None, retries: int = 3, folder_name: str = "rest-automotive-part1") -> Optional[str]:
         """
         Upload a file object to R2 with automatic partitioning
         
@@ -146,11 +147,12 @@ class R2Helper:
             R2_filename: Filename in R2 (relative path without partition)
             target_date: Date for partitioning (defaults to yesterday)
             retries: Number of retry attempts
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
         
         Returns:
             Full R2 path or None if failed
         """
-        partition = self.get_partition_prefix(target_date)
+        partition = self.get_partition_prefix(target_date, folder_name)
         R2_key = f"{partition}/{R2_filename}"
         
         for attempt in range(retries):
@@ -187,7 +189,7 @@ class R2Helper:
         return None
     
     def upload_json_data(self, data: dict, R2_filename: str, 
-                        target_date: datetime = None, retries: int = 3) -> Optional[str]:
+                        target_date: datetime = None, retries: int = 3, folder_name: str = "rest-automotive-part1") -> Optional[str]:
         """
         Upload JSON data directly to R2
         
@@ -196,6 +198,7 @@ class R2Helper:
             R2_filename: Filename in R2 (relative path without partition)
             target_date: Date for partitioning (defaults to yesterday)
             retries: Number of retry attempts
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
         
         Returns:
             Full R2 path or None if failed
@@ -203,7 +206,7 @@ class R2Helper:
         import json
         from io import BytesIO
         
-        partition = self.get_partition_prefix(target_date)
+        partition = self.get_partition_prefix(target_date, folder_name)
         R2_key = f"{partition}/{R2_filename}"
         
         for attempt in range(retries):
@@ -293,7 +296,7 @@ class R2Helper:
     
     def upload_image(self, image_url: str, image_data: bytes, subcategory_slug: str,
                      target_date: datetime = None, listing_id: Optional[str] = None, 
-                     image_index: int = 0) -> Optional[str]:
+                     image_index: int = 0, folder_name: str = "rest-automotive-part1", category_name: str = None) -> Optional[str]:
         """
         Upload image bytes to R2 with ID-based naming
         
@@ -304,6 +307,8 @@ class R2Helper:
             target_date: Date for partitioning
             listing_id: Listing ID for image naming (if provided, image will be named as listing_id_index.jpg)
             image_index: Index of image in the list (0, 1, 2, etc.)
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
+            category_name: Parent category name (e.g., 'Watercraft') for folder structure
         
         Returns:
             Full R2 path or None if failed
@@ -318,8 +323,13 @@ class R2Helper:
                 if not filename:
                     filename = f"image_{int(__import__('time').time())}.jpg"
             
-            partition = self.get_partition_prefix(target_date)
-            R2_key = f"{partition}/images/{subcategory_slug}/{filename}"
+            partition = self.get_partition_prefix(target_date, folder_name)
+            
+            # Include category name in path if provided
+            if category_name:
+                R2_key = f"{partition}/images/{category_name}/{subcategory_slug}/{filename}"
+            else:
+                R2_key = f"{partition}/images/{subcategory_slug}/{filename}"
             
             logger.info(f"Uploading image: {filename}")
             logger.info(f"Full R2 path: r2://{self.bucket_name}/{R2_key}")
@@ -361,18 +371,19 @@ class R2Helper:
         _ep = CF_R2_ENDPOINT_URL.rstrip("/").removesuffix("/" + self.bucket_name)
         return f"{_ep}/{self.bucket_name}/{R2_key}"
     
-    def list_files_in_partition(self, prefix: str = None, target_date: datetime = None) -> list:
+    def list_files_in_partition(self, prefix: str = None, target_date: datetime = None, folder_name: str = "rest-automotive-part1") -> list:
         """
         List all files in a partition
         
         Args:
             prefix: Additional prefix to search (relative to partition)
             target_date: Date for partition (defaults to yesterday)
+            folder_name: Folder name in R2 (defaults to 'rest-automotive-part1')
         
         Returns:
             List of file keys
         """
-        partition = self.get_partition_prefix(target_date)
+        partition = self.get_partition_prefix(target_date, folder_name)
         if prefix:
             full_prefix = f"{partition}/{prefix}"
         else:

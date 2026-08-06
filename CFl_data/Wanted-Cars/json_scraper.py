@@ -16,15 +16,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class WantedCarsJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
+    Scrapes Q84Sale wanted-cars listings using JSON data from __NEXT_DATA__ script tag
     This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
-    Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
+    Handles subcategories: Wanted American Cars, Wanted European Car, Wanted Asian Cars
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/automotive/wanted-cars"
         self.session = create_session()
         
     async def init_browser(self):
@@ -65,42 +65,39 @@ class GiftsJsonScraper:
     
     async def get_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
-        Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
+        Get all subcategories from the wanted-cars main page
+        Returns catChilds: Wanted American Cars, Wanted European Car, Wanted Asian Cars
         """
         try:
-            logger.info("Fetching gifts subcategories...")
-            url = self.base_url
+            logger.info("Fetching wanted-cars subcategories...")
+            url = f"{self.base_url}/1"
             json_data = await self.get_page_json_data(url)
             
             if not json_data:
                 logger.error("Failed to fetch main page JSON")
                 return []
             
-            # Extract verticalSubcats from the JSON structure
-            vertical_subcats = (
+            # Extract catChilds from the JSON structure
+            cat_childs = (
                 json_data.get("props", {})
                 .get("pageProps", {})
-                .get("verticalSubcats", [])
+                .get("catChilds", [])
             )
             
-            if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+            if not cat_childs:
+                logger.warning("No catChilds found in wanted-cars page")
                 return []
             
             subcategories = []
-            for subcat in vertical_subcats:
+            for child in cat_childs:
                 subcategories.append({
-                    "id": subcat.get("id"),
-                    "slug": subcat.get("slug"),
-                    "name_ar": subcat.get("name_ar"),
-                    "name_en": subcat.get("name_en"),
-                    "listings_count": subcat.get("listings_count"),
-                    "parent_slug": subcat.get("category_parent_slug"),
-                    "slug_url": subcat.get("slug_url"),
-                    "image": subcat.get("image"),
-                    "featured_image": subcat.get("featured_image"),
-                    "category_type": subcat.get("category_type"),
+                    "id": child.get("id"),
+                    "slug": child.get("slug"),
+                    "name_ar": child.get("name_ar"),
+                    "name_en": child.get("name_en"),
+                    "listings_count": child.get("listings_count"),
+                    "parent_slug": child.get("category_parent_slug"),
+                    "slug_url": child.get("slug_url"),
                 })
             
             logger.info(f"Found {len(subcategories)} subcategories")
@@ -116,10 +113,10 @@ class GiftsJsonScraper:
     async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
                           filter_yesterday: bool = False) -> tuple:
         """
-        Get all listings for a specific gifts subcategory
+        Get all listings for a specific wanted-cars subcategory
         
         Args:
-            subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
+            subcategory_slug: The slug of the category (e.g., 'wanted-american-cars')
             page_num: Page number (default 1)
             filter_yesterday: If True, only returns listings from yesterday
         
@@ -127,7 +124,7 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
+            # Build URL using the wanted-cars parent slug
             url = f"{self.base_url}/{subcategory_slug}/{page_num}"
             logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
             
@@ -279,10 +276,10 @@ class GiftsJsonScraper:
     async def get_listing_details(self, slug: str, status: str = "normal") -> Optional[Dict]:
         """
         Get detailed information for a specific listing from the listing details page
-        Uses the slug to construct the URL (e.g., men-clothes-20494669)
+        Uses the slug to construct the URL (e.g., wanted-american-cars-20476856)
         
         Args:
-            slug: Listing slug (e.g., 'men-clothes-20494669')
+            slug: Listing slug (e.g., 'wanted-american-cars-20476856')
             status: Listing status (normal/pinned etc.)
         
         Returns:

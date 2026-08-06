@@ -16,15 +16,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GiftsJsonScraper:
+class FashionFamilyJsonScraper:
     """
-    Scrapes Q84Sale gifts listings using JSON data from __NEXT_DATA__ script tag
+    Scrapes Q84Sale fashion-and-family listings using JSON data from __NEXT_DATA__ script tag
     This approach is fast and reliable using BeautifulSoup4 to extract JSON from HTML
     Structure: Main category -> Subcategories (verticalSubcats) -> Listings (with pagination) -> Details
     """
     
     def __init__(self):
-        self.base_url = "https://www.q84sale.com/ar/gifts"
+        self.base_url = "https://www.q84sale.com/ar/fashion-and-family"
         self.session = create_session()
         
     async def init_browser(self):
@@ -65,11 +65,11 @@ class GiftsJsonScraper:
     
     async def get_subcategories(self) -> List[Dict]:
         """
-        Get all subcategories from the gifts main page
+        Get all subcategories from the fashion-and-family main page
         Returns verticalSubcats: Men Clothes, Men Shoes, Ladies Clothes, etc.
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching fashion-and-family subcategories...")
             url = self.base_url
             json_data = await self.get_page_json_data(url)
             
@@ -85,7 +85,7 @@ class GiftsJsonScraper:
             )
             
             if not vertical_subcats:
-                logger.warning("No verticalSubcats found in gifts page")
+                logger.warning("No verticalSubcats found in fashion-and-family page")
                 return []
             
             subcategories = []
@@ -116,7 +116,7 @@ class GiftsJsonScraper:
     async def get_listings(self, subcategory_slug: str, page_num: int = 1, 
                           filter_yesterday: bool = False) -> tuple:
         """
-        Get all listings for a specific gifts subcategory
+        Get all listings for a specific fashion-and-family subcategory
         
         Args:
             subcategory_slug: The slug of the subcategory (e.g., 'men-clothes')
@@ -127,7 +127,7 @@ class GiftsJsonScraper:
             Tuple of (listings, total_pages)
         """
         try:
-            # Build URL using the gifts parent slug
+            # Build URL using the fashion-and-family parent slug
             url = f"{self.base_url}/{subcategory_slug}/{page_num}"
             logger.info(f"Fetching listings for {subcategory_slug} page {page_num}...")
             

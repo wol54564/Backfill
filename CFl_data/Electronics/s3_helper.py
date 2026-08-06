@@ -17,7 +17,7 @@ CF_R2_ENDPOINT_URL = os.getenv('CF_R2_ENDPOINT_URL')
 class R2Helper:
     """
     Helper class for Cloudflare R2 operations with partition structure
-    Partitions data by date: gifts/year=YYYY/month=MM/day=DD/
+    Partitions data by date: electronics/year=YYYY/month=MM/day=DD/
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, region_name: str = None):
@@ -69,23 +69,22 @@ class R2Helper:
     def get_partition_prefix(self, target_date: datetime = None) -> str:
         """
         Get R2 partition prefix based on date
-        Format: 4sale-data/gifts/year=YYYY/month=MM/day=DD/
+        Format: 4sale-data/electronics/year=YYYY/month=MM/day=DD/
         
         Args:
-            target_date: Date to partition by (defaults to yesterday)
+            target_date: Date to partition by (defaults to today)
         
         Returns:
             Partition prefix string
         """
         if target_date is None:
-            from datetime import timedelta
-            target_date = datetime.now() - timedelta(days=1)
+            target_date = datetime.now()
         
         year = target_date.strftime('%Y')
         month = target_date.strftime('%m')
         day = target_date.strftime('%d')
         
-        return f"4sale-data/gifts/year={year}/month={month}/day={day}"
+        return f"4sale-data/electronics/year={year}/month={month}/day={day}"
     
     def upload_file(self, local_file_path: str, R2_filename: str, 
                     target_date: datetime = None, retries: int = 3) -> Optional[str]:
@@ -95,7 +94,7 @@ class R2Helper:
         Args:
             local_file_path: Path to local file
             R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
             retries: Number of retry attempts
         
         Returns:
@@ -144,7 +143,7 @@ class R2Helper:
         Args:
             file_obj: File-like object
             R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
             retries: Number of retry attempts
         
         Returns:
@@ -194,7 +193,7 @@ class R2Helper:
         Args:
             data: Dictionary to upload as JSON
             R2_filename: Filename in R2 (relative path without partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
             retries: Number of retry attempts
         
         Returns:
@@ -250,7 +249,7 @@ class R2Helper:
         
         Args:
             prefix: Custom prefix (if not provided, uses date partition)
-            target_date: Date for partitioning (defaults to yesterday)
+            target_date: Date for partitioning (defaults to today)
         
         Returns:
             List of R2 keys
@@ -367,7 +366,7 @@ class R2Helper:
         
         Args:
             prefix: Additional prefix to search (relative to partition)
-            target_date: Date for partition (defaults to yesterday)
+            target_date: Date for partition (defaults to today)
         
         Returns:
             List of file keys

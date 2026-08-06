@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
-from json_scraper import GiftsJsonScraper
+from json_scraper import CampingJsonScraper
 from s3_helper import R2Helper
 
 logging.basicConfig(
@@ -17,10 +17,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class GiftsScraperOrchestrator:
+class CampingScraperOrchestrator:
     """
-    Orchestrates the scraping of gifts data with AWS R2 integration
-    Scrapes subcategories: Men Clothes, Men Shoes, Ladies Clothes, Women Accessories, etc.
+    Orchestrates the scraping of camping data with AWS R2 integration
+    Scrapes subcategories: Trampoline For Rent, Camping Stuff, Tents, etc.
     """
     
     def __init__(self, bucket_name: str, profile_name: Optional[str] = None, temp_dir: str = "temp_data"):
@@ -32,17 +32,14 @@ class GiftsScraperOrchestrator:
         self.temp_dir.mkdir(exist_ok=True)
         self.scrape_date = datetime.now() - timedelta(days=1)  # Yesterday's data for scraping
         self.save_date = datetime.now()  # Today's date for R2 folder partitioning
-        self.start_time = None
-        self.requests_total = 0
-        self.requests_failed = 0
         logger.info(f"Scraping data for date: {self.scrape_date.strftime('%Y-%m-%d')}")
         logger.info(f"Saving to R2 with date: {self.save_date.strftime('%Y-%m-%d')}")
         logger.info("Mode: Scrape ALL available pages (no limit)")
         
     async def initialize(self):
         """Initialize the scraper and R2 client"""
-        self.scraper = GiftsJsonScraper()
-        # No browser initialization needed with BeautifulSoup
+        self.scraper = CampingJsonScraper()
+        await self.scraper.initialize()
         
         try:
             self.R2_helper = R2Helper(
@@ -144,7 +141,7 @@ class GiftsScraperOrchestrator:
     
     async def scrape_subcategory(self, subcategory: Dict) -> Dict:
         """
-        Scrape a gifts subcategory with listings and detailed information
+        Scrape a camping subcategory with listings and detailed information
         Automatically scrapes all available pages returned by the API
         
         Args:
@@ -206,11 +203,11 @@ class GiftsScraperOrchestrator:
     
     async def scrape_all_subcategories(self) -> List[Dict]:
         """
-        Scrape all gifts subcategories from the main page
+        Scrape all camping subcategories from the main page
         Automatically discovers and scrapes all available pages
         """
         try:
-            logger.info("Fetching gifts subcategories...")
+            logger.info("Fetching camping subcategories...")
             subcategories = await self.scraper.get_subcategories()
             
             if not subcategories:
@@ -238,7 +235,7 @@ class GiftsScraperOrchestrator:
     async def save_all_to_R2(self, results: List[Dict]) -> Dict:
         """
         Save all data to R2 with proper partitioning
-        Creates an Excel file named 'gifts' with sheets for each subcategory
+        Creates an Excel file named 'camping' with sheets for each subcategory
         """
         upload_summary = {
             "excel_files": [],
@@ -258,13 +255,13 @@ class GiftsScraperOrchestrator:
             logger.info("\nUploading to AWS R2...")
             
             # Create single Excel file with sheets for each subcategory
-            logger.info("Creating Excel file 'gifts' with subcategory sheets...")
+            logger.info("Creating Excel file 'camping' with subcategory sheets...")
             
-            temp_excel = self.temp_dir / "gifts_temp.xlsx"
+            temp_excel = self.temp_dir / "camping_temp.xlsx"
             with pd.ExcelWriter(temp_excel, engine='openpyxl') as writer:
                 # Create Info sheet with summary
                 info_data = [{
-                    "Project": "Gifts",
+                    "Project": "Camping",
                     "Total Subcategories": len(results),
                     "Total Listings": total_listings,
                     "Data Scraped Date": self.scrape_date.strftime('%Y-%m-%d'),
@@ -287,7 +284,7 @@ class GiftsScraperOrchestrator:
             R2_excel_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
                 str(temp_excel),
-                f"excel-files/gifts.xlsx",
+                f"excel-files/camping.xlsx",
                 self.save_date,
                 retries=3
             )
@@ -295,13 +292,13 @@ class GiftsScraperOrchestrator:
             if R2_excel_path:
                 R2_url = self.R2_helper.generate_R2_url(R2_excel_path)
                 upload_summary["excel_files"].append({
-                    "name": "gifts",
+                    "name": "camping",
                     "subcategories_count": len(results),
                     "total_listings": total_listings,
                     "R2_path": R2_excel_path,
                     "R2_url": R2_url
                 })
-                logger.info(f"[OK] Uploaded: gifts.xlsx ({total_listings} listings across {len(results)} subcategories)")
+                logger.info(f"[OK] Uploaded: camping.xlsx ({total_listings} listings across {len(results)} subcategories)")
 
             json_version_payload = [
                 {
@@ -311,27 +308,27 @@ class GiftsScraperOrchestrator:
                 for result in results
                 if result["listings"]
             ]
-            json_version_file = self.temp_dir / "gifts_json_version_temp.json"
+            json_version_file = self.temp_dir / "camping_json_version_temp.json"
             with open(json_version_file, 'w', encoding='utf-8') as jf:
                 json.dump(json_version_payload, jf, ensure_ascii=False, indent=2)
 
             R2_json_version_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
                 str(json_version_file),
-                f"json version/gifts.json",
+                f"json version/camping.json",
                 self.save_date,
                 retries=3
             )
             if R2_json_version_path:
                 upload_summary["json_files"].append(R2_json_version_path)
-                logger.info("[OK] Uploaded JSON version: gifts.json")
+                logger.info("[OK] Uploaded JSON version: camping.json")
             json_version_file.unlink(missing_ok=True)
             
             temp_excel.unlink(missing_ok=True)
             
             # Create and upload JSON file
             logger.info("Creating JSON file with summary...")
-            json_file = self.temp_dir / "gifts_temp.json"
+            json_file = self.temp_dir / "camping_temp.json"
             
             # Build subcategories summary
             subcategories_summary = []
@@ -374,7 +371,7 @@ class GiftsScraperOrchestrator:
             R2_json_path = await asyncio.to_thread(
                 self.R2_helper.upload_file,
                 str(json_file),
-                f"json-files/gifts.json",
+                f"json-files/camping.json",
                 self.save_date,
                 retries=3
             )
@@ -382,12 +379,12 @@ class GiftsScraperOrchestrator:
             if R2_json_path:
                 R2_url = self.R2_helper.generate_R2_url(R2_json_path)
                 upload_summary["json_files"].append({
-                    "name": "gifts",
+                    "name": "camping",
                     "total_listings": total_listings,
                     "R2_path": R2_json_path,
                     "R2_url": R2_url
                 })
-                logger.info(f"[OK] Uploaded: gifts.json ({total_listings} listings)")
+                logger.info(f"[OK] Uploaded: camping.json ({total_listings} listings)")
             
             json_file.unlink(missing_ok=True)
             
@@ -403,7 +400,7 @@ class GiftsScraperOrchestrator:
             self.start_time = time.time()
             
             logger.info("=" * 80)
-            logger.info("GIFTS SCRAPER ORCHESTRATOR")
+            logger.info("CAMPING SCRAPER ORCHESTRATOR")
             logger.info("=" * 80)
             
             # Scrape all subcategories with their listings
@@ -444,7 +441,7 @@ async def main():
     # Configuration
     BUCKET_NAME = os.environ.get("CF_R2_BUCKET_NAME")
     
-    orchestrator = GiftsScraperOrchestrator(
+    orchestrator = CampingScraperOrchestrator(
         bucket_name=BUCKET_NAME,
     )
     

@@ -1,0 +1,17 @@
+# Core scraping and async
+playwright==1.40.0
+nest-asyncio==1.5.6
+aiohttp==3.8.6
+
+# Data handling
+pandas==2.1.1
+openpyxl==3.1.3
+XlsxWriter==3.1.2
+
+# AWS
+boto3
+
+# Utilities
+python-dateutil==2.8.2
+Pillow==10.1.0
+curl_cffi>=0.7.0
