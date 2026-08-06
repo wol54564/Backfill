@@ -1,0 +1,178 @@
+name: "Backfill — Camping (3-day chunks)"
+
+# Splits camping TARGET_DATE range 2026-07-21 → 2026-08-06 across 3 run days:
+#
+#   2026-08-07  →  2026-07-21 … 2026-07-26
+#   2026-08-08  →  2026-07-27 … 2026-07-31
+#   2026-08-09  →  2026-08-01 … 2026-08-06
+#
+# Schedule is 06:00 UTC (= 09:00 Asia/Riyadh UTC+3).
+# Manual re-run: workflow_dispatch with optional day=1|2|3.
+
+on:
+  schedule:
+    # Aug 7, 8, 9 — every year at 06:00 UTC (script only proceeds for 2026 dates)
+    - cron: '0 6 7,8,9 8 *'
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'Force chunk day. Use auto to pick from today''s schedule.'
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - '1'
+          - '2'
+          - '3'
+
+concurrency:
+  group: backfill-camping-3day
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUTF8: '1'
+  CATEGORY: camping
+
+jobs:
+
+  prepare:
+    name: Resolve camping chunk
+    runs-on: ubuntu-22.04
+    outputs:
+      skip: ${{ steps.chunk.outputs.skip }}
+      start_date: ${{ steps.chunk.outputs.start_date }}
+      end_date: ${{ steps.chunk.outputs.end_date }}
+      day: ${{ steps.chunk.outputs.day }}
+      account: ${{ steps.meta.outputs.account }}
+      geo: ${{ steps.geo.outputs.geo }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Resolve date chunk
+        id: chunk
+        run: |
+          DAY_INPUT="${{ github.event.inputs.day }}"
+          RUN_DATE=$(date -u +%Y-%m-%d)
+          echo "UTC run date: $RUN_DATE"
+
+          if [ -n "$DAY_INPUT" ] && [ "$DAY_INPUT" != "auto" ]; then
+            python CFl_data/backfill-data/camping_chunk_schedule.py --day "$DAY_INPUT"
+          else
+            python CFl_data/backfill-data/camping_chunk_schedule.py \
+              --run-date "$RUN_DATE" \
+              --allow-skip
+          fi
+
+      - name: Skip if no chunk for today
+        if: steps.chunk.outputs.skip == 'true'
+        run: |
+          echo "No camping chunk for this calendar date — exiting prepare successfully."
+          echo "Use workflow_dispatch with day=1|2|3 to force a chunk."
+
+      - name: Account + validate range
+        id: meta
+        if: steps.chunk.outputs.skip != 'true'
+        run: |
+          START="${{ steps.chunk.outputs.start_date }}"
+          END="${{ steps.chunk.outputs.end_date }}"
+          if [ -z "$START" ] || [ -z "$END" ]; then
+            echo "ERROR: Missing start/end from chunk resolver." >&2
+            exit 1
+          fi
+          # camping → DataImpulse account 1
+          echo "account=1" >> $GITHUB_OUTPUT
+          DAYS=$(( ( $(date -d "$END" +%s) - $(date -d "$START" +%s) ) / 86400 + 1 ))
+          echo "============================================="
+          echo "CATEGORY   : camping"
+          echo "CHUNK DAY  : ${{ steps.chunk.outputs.day }}/3"
+          echo "DATE RANGE : $START → $END  ($DAYS day(s))"
+          echo "ACCOUNT    : DATAIMPULSE_USER_1"
+          echo "============================================="
+
+      - name: Determine geo from chunk start date
+        id: geo
+        if: steps.chunk.outputs.skip != 'true'
+        run: |
+          TARGET_DATE="${{ steps.chunk.outputs.start_date }}"
+          DOW=$(date -d "$TARGET_DATE" +%w)
+          # Account 1 rotation
+          if [ "$DOW" = "0" ]; then GEO="eg"
+          elif [ $(( DOW % 2 )) = "1" ]; then GEO="kw"
+          else GEO="sa"; fi
+          echo "geo=$GEO" >> $GITHUB_OUTPUT
+          echo "Geo for account 1 on $TARGET_DATE (DOW=$DOW): __cr.$GEO"
+
+  scrape:
+    name: "Camping chunk ${{ needs.prepare.outputs.day }}/3"
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-22.04
+    env:
+      CATEGORY: camping
+      START_DATE: ${{ needs.prepare.outputs.start_date }}
+      END_DATE: ${{ needs.prepare.outputs.end_date }}
+      DATAIMPULSE_HOST: gw.dataimpulse.com
+      DATAIMPULSE_PORT: '823'
+      DATAIMPULSE_USER: ${{ secrets.DATAIMPULSE_USER_1 }}__cr.${{ needs.prepare.outputs.geo }}
+      DATAIMPULSE_PASS: ${{ secrets.DATAIMPULSE_PASS_1 }}
+      CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+      CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+      CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+      CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r CFl_data/requirements.txt
+
+      - name: Sync system clock (prevent R2 RequestTimeTooSkewed)
+        run: |
+          echo "UTC before sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sudo timedatectl set-ntp true
+          sudo systemctl restart systemd-timesyncd 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chrony
+          sudo chronyd -q 'pool pool.ntp.org iburst' || sudo chronyc -a makestep
+          echo "UTC after sync:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Show backfill plan
+        run: |
+          echo "============================================="
+          echo "CAMPING 3-DAY BACKFILL — Day ${{ needs.prepare.outputs.day }}/3"
+          echo "Start date  : $START_DATE"
+          echo "End date    : $END_DATE"
+          echo "Geo         : __cr.${{ needs.prepare.outputs.geo }}"
+          echo "============================================="
+          CURRENT="$START_DATE"
+          while [ "$CURRENT" != "$(date -d "$END_DATE +1 day" +%Y-%m-%d)" ]; do
+            SCRAPE=$(date -d "$CURRENT -1 day" +%Y-%m-%d)
+            echo "  TARGET=$CURRENT  scrape=$SCRAPE  →  year=$(date -d "$CURRENT" +%Y)/month=$(date -d "$CURRENT" +%m)/day=$(date -d "$CURRENT" +%d)/"
+            CURRENT=$(date -d "$CURRENT +1 day" +%Y-%m-%d)
+          done
+
+      - name: Run backfill
+        run: python CFl_data/backfill-data/run_backfill.py
+
+      - name: Backfill summary
+        if: always()
+        run: |
+          echo "============================================="
+          echo "CAMPING CHUNK COMPLETE — Day ${{ needs.prepare.outputs.day }}/3"
+          echo "Range    : $START_DATE → $END_DATE"
+          echo "Geo      : __cr.${{ needs.prepare.outputs.geo }}"
+          echo "============================================="
