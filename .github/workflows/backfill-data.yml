@@ -189,6 +189,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r CFl_data/requirements.txt
 
+      # R2/S3 SigV4 rejects requests when the runner clock drifts > ~15 min from server time.
+      - name: Sync system clock (prevent R2 RequestTimeTooSkewed)
+        run: |
+          echo "UTC before sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sudo timedatectl set-ntp true
+          sudo systemctl restart systemd-timesyncd 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chrony
+          sudo chronyd -q 'pool pool.ntp.org iburst' || sudo chronyc -a makestep
+          echo "UTC after sync:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
       - name: Show backfill plan
         run: |
           echo "============================================="
