@@ -211,7 +211,11 @@ def _preimport_datetime_subclassers() -> None:
 @contextmanager
 def patched_datetime(target_date: datetime) -> Iterator[None]:
     """
-    Patch datetime.datetime.now() to return target_date at noon UTC-local naive.
+    Patch datetime.datetime.now() to return target_date at noon (naive).
+
+    Replaces datetime.datetime with a thin subclass so now()/utcnow() and date
+    arithmetic all yield the same subclass — plain datetime from subtraction
+    breaks pandas/openpyxl during Excel export.
     Must be active before importing any category module (Property sets module-level
     constants at import time).
     """
@@ -223,14 +227,33 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
 
     class _BackfillDateTime(original):
         @classmethod
+        def _wrap(cls, dt: datetime) -> "_BackfillDateTime":
+            return cls(
+                dt.year, dt.month, dt.day,
+                dt.hour, dt.minute, dt.second, dt.microsecond, dt.tzinfo,
+            )
+
+        @classmethod
         def now(cls, tz=None):
             if tz is not None:
-                return frozen.astimezone(tz)
-            return frozen
+                return cls._wrap(frozen.astimezone(tz))
+            return cls._wrap(frozen)
 
         @classmethod
         def utcnow(cls):
-            return frozen
+            return cls._wrap(frozen)
+
+        def __add__(self, other):
+            result = super().__add__(other)
+            if isinstance(result, original):
+                return self.__class__._wrap(result)
+            return result
+
+        def __sub__(self, other):
+            result = super().__sub__(other)
+            if isinstance(other, timedelta) and isinstance(result, original):
+                return self.__class__._wrap(result)
+            return result
 
     dt_module.datetime = _BackfillDateTime
     try:
