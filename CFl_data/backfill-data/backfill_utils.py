@@ -196,6 +196,18 @@ def resolve_category(name: str) -> dict:
     return CATEGORIES[key]
 
 
+def _preimport_datetime_subclassers() -> None:
+    """
+    Import libraries that subclass datetime.datetime at load time.
+
+    patched_datetime replaces datetime.datetime with a dynamic subclass, which
+    breaks those imports (e.g. pandas ABCTimestamp). Pre-import while the real
+    class is still in place; later category imports reuse sys.modules cache.
+    """
+    if "pandas" not in sys.modules:
+        import pandas  # noqa: F401
+
+
 @contextmanager
 def patched_datetime(target_date: datetime) -> Iterator[None]:
     """
@@ -203,6 +215,7 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
     Must be active before importing any category module (Property sets module-level
     constants at import time).
     """
+    _preimport_datetime_subclassers()
     import datetime as dt_module
 
     frozen = target_date.replace(hour=12, minute=0, second=0, microsecond=0)
