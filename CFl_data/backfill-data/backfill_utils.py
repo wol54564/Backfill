@@ -217,9 +217,10 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
     stay consistent for scrapers (plain datetime from subtraction breaks
     pandas/openpyxl during Excel export).
 
-    Critical: utcnow() and now(tz=...) keep the real wall clock. botocore SigV4
-    signing uses datetime.datetime.utcnow(); freezing that causes R2
-    RequestTimeTooSkewed when backfilling historical TARGET_DATEs.
+    Critical: utcnow() returns the real wall clock (wrapped in this subclass).
+    botocore SigV4 signing uses datetime.datetime.utcnow(); freezing that to
+    TARGET_DATE caused R2 RequestTimeTooSkewed on historical backfills.
+    now(tz=...) likewise uses real time for botocore credential checks.
 
     Must be active before importing any category module (Property sets
     module-level constants at import time).
@@ -240,15 +241,18 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
 
         @classmethod
         def now(cls, tz=None):
-            # Aware now() is used by botocore credentials / expiry checks.
+            # Aware now() is used by botocore credentials / expiry checks —
+            # must reflect real wall clock, not the backfill TARGET_DATE.
             if tz is not None:
                 return original.now(tz)
             return cls._wrap(frozen)
 
         @classmethod
         def utcnow(cls):
-            # botocore auth.py signs with utcnow(); must be real time.
-            return original.utcnow()
+            # botocore SigV4 uses utcnow() for the request timestamp. Returning
+            # TARGET_DATE caused RequestTimeTooSkewed on R2. Wrap real UTC so
+            # openpyxl/pandas (which expect this subclass) still type-check.
+            return cls._wrap(original.utcnow())
 
         def __add__(self, other):
             result = super().__add__(other)
