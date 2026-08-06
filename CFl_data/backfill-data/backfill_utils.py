@@ -211,13 +211,18 @@ def _preimport_datetime_subclassers() -> None:
 @contextmanager
 def patched_datetime(target_date: datetime) -> Iterator[None]:
     """
-    Patch datetime.datetime.now() to return target_date at noon (naive).
+    Patch naive datetime.datetime.now() to return target_date at noon.
 
-    Replaces datetime.datetime with a thin subclass so now()/utcnow() and date
-    arithmetic all yield the same subclass — plain datetime from subtraction
-    breaks pandas/openpyxl during Excel export.
-    Must be active before importing any category module (Property sets module-level
-    constants at import time).
+    Replaces datetime.datetime with a thin subclass so now() and date arithmetic
+    stay consistent for scrapers (plain datetime from subtraction breaks
+    pandas/openpyxl during Excel export).
+
+    Critical: utcnow() and now(tz=...) keep the real wall clock. botocore SigV4
+    signing uses datetime.datetime.utcnow(); freezing that causes R2
+    RequestTimeTooSkewed when backfilling historical TARGET_DATEs.
+
+    Must be active before importing any category module (Property sets
+    module-level constants at import time).
     """
     _preimport_datetime_subclassers()
     import datetime as dt_module
@@ -235,13 +240,15 @@ def patched_datetime(target_date: datetime) -> Iterator[None]:
 
         @classmethod
         def now(cls, tz=None):
+            # Aware now() is used by botocore credentials / expiry checks.
             if tz is not None:
-                return cls._wrap(frozen.astimezone(tz))
+                return original.now(tz)
             return cls._wrap(frozen)
 
         @classmethod
         def utcnow(cls):
-            return cls._wrap(frozen)
+            # botocore auth.py signs with utcnow(); must be real time.
+            return original.utcnow()
 
         def __add__(self, other):
             result = super().__add__(other)
