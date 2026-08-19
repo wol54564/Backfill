@@ -1,0 +1,112 @@
+name: "R2 storage analysis"
+
+# Lists Cloudflare R2 object metadata (no downloads) and reports size by:
+#   1) whole bucket  — Excel / JSON / images (and each image type)
+#   2) each website folder (4sale-data, bleems-data, …)
+#   3) each day from the oldest partition through today
+#
+# Path layout:
+#   {bucket}/4sale-data/animals/year=2026/month=08/day=01/
+#   {bucket}/bleems-data/year=2026/month=08/day=01/
+
+on:
+  workflow_dispatch:
+    inputs:
+      website:
+        description: "Website folder only (e.g. 4sale-data). Leave empty for every website."
+        required: false
+        default: ""
+        type: string
+      prefix:
+        description: "Optional key prefix inside the bucket. Leave empty if websites sit at the bucket root."
+        required: false
+        default: ""
+        type: string
+      fill_missing_days:
+        description: "Include empty days from oldest found date through today"
+        required: true
+        type: choice
+        default: "yes"
+        options:
+          - "yes"
+          - "no"
+
+concurrency:
+  group: r2-analysis
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUTF8: "1"
+
+jobs:
+  analyze:
+    name: Analyze R2 storage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+      CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+      CF_R2_ENDPOINT_URL: ${{ secrets.CF_R2_ENDPOINT_URL }}
+      CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r CFl_data/requirements.txt
+
+      - name: Sync system clock (prevent R2 RequestTimeTooSkewed)
+        run: |
+          echo "UTC before sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sudo timedatectl set-ntp true
+          sudo systemctl restart systemd-timesyncd 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chrony
+          sudo chronyd -q 'pool pool.ntp.org iburst' || sudo chronyc -a makestep
+          echo "UTC after sync:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Run R2 analysis
+        env:
+          WEBSITE: ${{ github.event.inputs.website }}
+          PREFIX: ${{ github.event.inputs.prefix }}
+          FILL_DAYS: ${{ github.event.inputs.fill_missing_days }}
+        run: |
+          echo "============================================="
+          echo "Bucket  : $CF_R2_BUCKET_NAME"
+          echo "Prefix  : ${PREFIX:-"(root)"}"
+          echo "Website : ${WEBSITE:-"all"}"
+          echo "Fill days: $FILL_DAYS"
+          echo "============================================="
+
+          EXTRA_ARGS=()
+          if [ -n "$WEBSITE" ]; then
+            EXTRA_ARGS+=(--website "$WEBSITE")
+          fi
+          if [ -n "$PREFIX" ]; then
+            EXTRA_ARGS+=(--prefix "$PREFIX")
+          fi
+          if [ "$FILL_DAYS" = "no" ]; then
+            EXTRA_ARGS+=(--no-fill-missing-days)
+          fi
+
+          python CFl_data/r2-analysis/analyze_r2.py \
+            --bucket "$CF_R2_BUCKET_NAME" \
+            --output r2-analysis-output \
+            --github-summary "$GITHUB_STEP_SUMMARY" \
+            "${EXTRA_ARGS[@]}"
+
+      - name: Upload analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2-analysis-report
+          path: r2-analysis-output/
+          retention-days: 30
+          if-no-files-found: warn
