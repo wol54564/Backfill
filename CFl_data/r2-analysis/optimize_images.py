@@ -24,7 +24,10 @@ from threading import Lock
 
 import boto3
 from botocore.config import Config
-from PIL import Image
+from PIL import Image, ImageFile, UnidentifiedImageError
+
+# Allow partially downloaded/truncated JPEGs when possible.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("optimize-images")
@@ -38,6 +41,8 @@ SOURCE_FOLDERS = {
 TARGET_DATE = "2026-08-17"
 WEBP_QUALITY = 50
 OUTPUT_ROOT = "optimize"
+MIN_IMAGE_BYTES = 32
+INVALID_WARN_LIMIT = 20
 
 
 def format_size(num_bytes: int | float) -> str:
@@ -128,8 +133,29 @@ def optimized_key(original_key: str, source: str, dest_name: str, year: str, mon
     return "/".join(p for p in parts if p)
 
 
+def describe_bad_bytes(data: bytes) -> str:
+    if not data:
+        return "empty file"
+    if data.startswith(b"<!DOCTYPE") or data.startswith(b"<html") or data.startswith(b"<HTML"):
+        return "HTML content (not an image)"
+    if data.startswith(b"{") or data.startswith(b"["):
+        return "JSON/text content (not an image)"
+    head = data[:16]
+    if all(32 <= b < 127 or b in (9, 10, 13) for b in head):
+        return f"text content: {head[:40]!r}"
+    return f"unrecognized binary ({len(data)} bytes, starts {head[:8].hex()})"
+
+
 def convert_to_webp(img_data: bytes) -> bytes:
-    img = Image.open(io.BytesIO(img_data))
+    if len(img_data) < MIN_IMAGE_BYTES:
+        raise ValueError(describe_bad_bytes(img_data))
+
+    try:
+        img = Image.open(io.BytesIO(img_data))
+        img.load()
+    except UnidentifiedImageError as exc:
+        raise ValueError(describe_bad_bytes(img_data)) from exc
+
     img = img.convert("RGBA") if img.mode in ("RGBA", "LA", "PA") else img.convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="WEBP", quality=WEBP_QUALITY)
@@ -173,9 +199,11 @@ def run(args: argparse.Namespace) -> None:
     year, month, day = TARGET_DATE.split("-")
 
     stats: dict[str, dict] = defaultdict(lambda: {
-        "original_bytes": 0, "optimized_bytes": 0, "count": 0, "errors": 0, "skipped": 0,
+        "original_bytes": 0, "optimized_bytes": 0, "count": 0,
+        "errors": 0, "invalid": 0, "skipped": 0, "uploaded": 0,
     })
     lock = Lock()
+    invalid_logged = 0
 
     logger.info("Sources : %s", ", ".join(SOURCE_FOLDERS))
     logger.info("Date    : %s", TARGET_DATE)
@@ -210,24 +238,48 @@ def run(args: argparse.Namespace) -> None:
         done = 0
 
         def handle(job: tuple[str, int, str]) -> None:
-            nonlocal done
+            nonlocal done, invalid_logged
             key, size, new_key = job
             status, opt_bytes, err = process_one(client, bucket, key, new_key, args.skip_existing)
             with lock:
                 stats[source]["original_bytes"] += size
                 stats[source]["count"] += 1
                 if status == "error":
-                    stats[source]["errors"] += 1
-                    logger.warning("    Failed %s: %s", key, err)
+                    is_invalid = err and (
+                        "empty file" in err
+                        or "not an image" in err
+                        or "unrecognized binary" in err
+                        or "text content" in err
+                        or "cannot identify image" in err.lower()
+                    )
+                    if is_invalid:
+                        stats[source]["invalid"] += 1
+                        if invalid_logged < INVALID_WARN_LIMIT:
+                            invalid_logged += 1
+                            logger.warning("    Skipping invalid image %s (%s bytes): %s", key, size, err)
+                        elif invalid_logged == INVALID_WARN_LIMIT:
+                            invalid_logged += 1
+                            logger.warning("    ... suppressing further invalid-image warnings (see summary)")
+                    else:
+                        stats[source]["errors"] += 1
+                        logger.warning("    Failed %s: %s", key, err)
                 else:
                     stats[source]["optimized_bytes"] += opt_bytes
                     if status == "skipped":
                         stats[source]["skipped"] += 1
+                    elif status == "uploaded":
+                        stats[source]["uploaded"] += 1
                 done += 1
                 if done % 50 == 0 or done == len(jobs):
                     logger.info(
-                        "    %s: %d/%d images (uploaded/skipped/errors tracked in summary)",
-                        source, done, len(jobs),
+                        "    %s: %d/%d done (%d uploaded, %d skipped, %d invalid, %d errors)",
+                        source,
+                        done,
+                        len(jobs),
+                        stats[source]["uploaded"],
+                        stats[source]["skipped"],
+                        stats[source]["invalid"],
+                        stats[source]["errors"],
                     )
 
         workers = max(1, args.workers)
@@ -240,14 +292,20 @@ def run(args: argparse.Namespace) -> None:
                 for fut in as_completed(futures):
                     fut.result()
 
-    print("\n" + "=" * 100)
-    print(f"{'Source':<20} {'Images':>7} {'Skipped':>8} {'Original':>12} {'WebP 50%':>12} {'Saved':>10} {'Errors':>7}")
-    print("-" * 100)
+    print("\n" + "=" * 110)
+    print(
+        f"{'Source':<20} {'Images':>7} {'Uploaded':>9} {'Skipped':>8} "
+        f"{'Invalid':>8} {'Original':>12} {'WebP 50%':>12} {'Saved':>10} {'Errors':>7}"
+    )
+    print("-" * 110)
 
     grand_original = 0
     grand_optimized = 0
     grand_count = 0
     grand_skipped = 0
+    grand_uploaded = 0
+    grand_invalid = 0
+    grand_errors = 0
 
     for source in SOURCE_FOLDERS:
         s = stats[source]
@@ -256,17 +314,28 @@ def run(args: argparse.Namespace) -> None:
         cnt = s["count"]
         errs = s["errors"]
         skipped = s["skipped"]
+        uploaded = s["uploaded"]
+        invalid = s["invalid"]
         saved_pct = f"{100 * (1 - opt / orig):.1f}%" if orig > 0 else "N/A"
-        print(f"{source:<20} {cnt:>7} {skipped:>8} {format_size(orig):>12} {format_size(opt):>12} {saved_pct:>10} {errs:>7}")
+        print(
+            f"{source:<20} {cnt:>7} {uploaded:>9} {skipped:>8} {invalid:>8} "
+            f"{format_size(orig):>12} {format_size(opt):>12} {saved_pct:>10} {errs:>7}"
+        )
         grand_original += orig
         grand_optimized += opt
         grand_count += cnt
         grand_skipped += skipped
+        grand_uploaded += uploaded
+        grand_invalid += invalid
+        grand_errors += errs
 
-    print("-" * 100)
+    print("-" * 110)
     total_saved = f"{100 * (1 - grand_optimized / grand_original):.1f}%" if grand_original > 0 else "N/A"
-    print(f"{'TOTAL':<20} {grand_count:>7} {grand_skipped:>8} {format_size(grand_original):>12} {format_size(grand_optimized):>12} {total_saved:>10}")
-    print("=" * 100)
+    print(
+        f"{'TOTAL':<20} {grand_count:>7} {grand_uploaded:>9} {grand_skipped:>8} {grand_invalid:>8} "
+        f"{format_size(grand_original):>12} {format_size(grand_optimized):>12} {total_saved:>10} {grand_errors:>7}"
+    )
+    print("=" * 110)
     print(f"Output prefix: {OUTPUT_ROOT}/4sale/{year}/{int(month)}/{int(day)}/ and {OUTPUT_ROOT}/bleems/{year}/{int(month)}/{int(day)}/")
     print("Originals were not modified.")
 
