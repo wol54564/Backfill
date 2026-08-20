@@ -1,10 +1,11 @@
 name: "R2 Image Optimizer — WebP 50%"
 
-# Downloads images from R2 for the last 2 partitions (2026-08-17 & 2026-08-18),
-# converts them to WebP at 50% quality, and uploads to:
-#   {website}/.../year=YYYY/month=MM/day=DD/optimized/{stem}.webp
-# Original images are kept untouched.
-# A summary table is printed showing total sizes per website per day.
+# Downloads images from R2 for 4sale-data and bleems-data on 2026-08-17 only,
+# converts them to WebP at 50% quality, and uploads copies to:
+#   optimize/4sale/2026/8/17/...
+#   optimize/bleems/2026/8/17/...
+# Original images are never modified or deleted.
+# A summary table is printed showing total sizes per source folder.
 
 on:
   workflow_dispatch:
@@ -65,11 +66,12 @@ jobs:
         run: |
           echo "============================================="
           echo "Bucket       : $CF_R2_BUCKET_NAME"
-          echo "Dates        : 2026-08-17 & 2026-08-18"
+          echo "Sources      : 4sale-data, bleems-data"
+          echo "Date         : 2026-08-17"
           echo "Format       : WebP at 50% quality"
           echo "Skip existing: $SKIP_EXISTING"
-          echo "Original keys: preserved (no deletion)"
-          echo "New path      : .../{date}/optimized/{stem}.webp"
+          echo "Original keys: preserved (no deletion, no overwrite)"
+          echo "New path      : optimize/{4sale|bleems}/2026/8/17/..."
           echo "============================================="
 
           EXTRA_ARGS=()
