@@ -39,6 +39,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("s3-analysis")
 
+DEFAULT_REGION = "us-east-1"
+
+
+def resolve_region(explicit: str = "") -> str:
+    """Return a non-empty AWS region (GitHub may set env vars to blank strings)."""
+    for candidate in (explicit, os.getenv("AWS_DEFAULT_REGION"), os.getenv("AWS_REGION"), DEFAULT_REGION):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return DEFAULT_REGION
+
 
 def make_s3_client(bucket_name: str, region: str):
     access_key = os.getenv("AWS_ACCESS_KEY_ID")
@@ -70,7 +80,7 @@ def analyze(args: argparse.Namespace) -> int:
     if not bucket:
         raise ValueError("Bucket name required via --bucket or S3_BUCKET_NAME")
 
-    region = args.region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    region = resolve_region(args.region)
     client = make_s3_client(bucket, region)
 
     prefix = (args.prefix or "").lstrip("/")
