@@ -1,0 +1,110 @@
+name: "AWS S3 storage analysis"
+
+# Lists AWS S3 object metadata (no downloads) and reports size by:
+#   1) whole bucket  — Excel / JSON / images (and each image type)
+#   2) each website folder (4sale-data, bleems-data, …)
+#   3) each day from the oldest partition through today
+#
+# Path layout (bucket = data-collection-dl):
+#   4sale-data/animals/year=2026/month=08/day=01/
+#   bleems-data/year=2026/month=08/day=01/
+#
+# Required GitHub secrets:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#   S3_BUCKET_NAME
+# Optional:
+#   AWS_DEFAULT_REGION (defaults to us-east-1 in the script)
+
+on:
+  workflow_dispatch:
+    inputs:
+      website:
+        description: "Website folder only (e.g. 4sale-data). Leave empty for every website."
+        required: false
+        default: ""
+        type: string
+      prefix:
+        description: "Optional key prefix inside the bucket. Leave empty if websites sit at the bucket root."
+        required: false
+        default: ""
+        type: string
+      fill_missing_days:
+        description: "Include empty days from oldest found date through today"
+        required: true
+        type: choice
+        default: "yes"
+        options:
+          - "yes"
+          - "no"
+
+concurrency:
+  group: s3-analysis
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUTF8: "1"
+
+jobs:
+  analyze:
+    name: Analyze S3 storage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r CFl_data/requirements.txt
+
+      - name: Run S3 analysis
+        env:
+          WEBSITE: ${{ github.event.inputs.website }}
+          PREFIX: ${{ github.event.inputs.prefix }}
+          FILL_DAYS: ${{ github.event.inputs.fill_missing_days }}
+        run: |
+          echo "============================================="
+          echo "Bucket  : $S3_BUCKET_NAME"
+          echo "Region  : ${AWS_DEFAULT_REGION:-us-east-1}"
+          echo "Prefix  : ${PREFIX:-"(root)"}"
+          echo "Website : ${WEBSITE:-"all"}"
+          echo "Fill days: $FILL_DAYS"
+          echo "============================================="
+
+          EXTRA_ARGS=()
+          if [ -n "$WEBSITE" ]; then
+            EXTRA_ARGS+=(--website "$WEBSITE")
+          fi
+          if [ -n "$PREFIX" ]; then
+            EXTRA_ARGS+=(--prefix "$PREFIX")
+          fi
+          if [ "$FILL_DAYS" = "no" ]; then
+            EXTRA_ARGS+=(--no-fill-missing-days)
+          fi
+
+          python CFl_data/s3-analysis/analyze_s3.py \
+            --bucket "$S3_BUCKET_NAME" \
+            --output s3-analysis-output \
+            --github-summary "$GITHUB_STEP_SUMMARY" \
+            "${EXTRA_ARGS[@]}"
+
+      - name: Upload analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-analysis-report
+          path: s3-analysis-output/
+          retention-days: 30
+          if-no-files-found: warn
